@@ -13,7 +13,7 @@ from evalyx.db.models.evaluation import (
     EvaluationRun,
     RunStatus,
 )
-from evalyx.db.models.guardrail import GuardrailResult
+from evalyx.db.models.guardrail import GuardrailResult, GuardrailStatus
 
 __all__ = [
     "Application",
@@ -25,6 +25,7 @@ __all__ = [
     "EvaluationCaseResult",
     "EvaluationRun",
     "GuardrailResult",
+    "GuardrailStatus",
     "RunStatus",
     "TestCase",
 ]

@@ -2,7 +2,7 @@
 
 An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents.
 
-## Status: pre-implementation (Phase 1 — architecture/audit)
+## Status: Phase 6 complete — guardrails, LLM judging & scoring
 
 ### Currently implemented
 
@@ -13,16 +13,17 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 - Domain model + Alembic migrations (`src/evalyx/db/models/`, `migrations/`): applications, application versions, datasets, dataset versions, test cases, evaluation runs, case results, guardrail results
 - Repository layer (`src/evalyx/db/repositories/`) — async data access for the domain
 - LLM provider abstraction (`src/evalyx/llm/`) — provider-neutral `LLMProvider` protocol + typed `LLMResponse`, async OpenRouter and Ollama implementations, bounded retries, typed error hierarchy, provider factory
-- Evaluation engine (`src/evalyx/evaluation/`) — executes a run's pinned dataset version through the injected `LLMProvider`, persists per-case results (status `executed`/`error` — scoring is Phase 6), returns a typed run summary
+- Evaluation engine (`src/evalyx/evaluation/`) — executes a run's pinned dataset version through the injected `LLMProvider`, persists per-case results (status `executed`/`error`), returns a typed run summary
+- Guardrails (`src/evalyx/guardrails/`) — provider-neutral `Guardrail` abstraction; deterministic PII and prompt-injection indicators; LLM-judge evaluation of instruction following, hallucination/unsupported claims, and safety; a harness with per-guardrail failure isolation and idempotent persistence
+- Scoring (`src/evalyx/evaluation/scoring.py`, `src/evalyx/evaluation/pipeline.py`) — combines guardrail verdicts into per-case outcomes (`executed → passed/failed`), keeps execution errors distinct, and produces accurate run summary counts; end-to-end orchestration via `EvaluationPipeline`
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
 
 ### Planned / future
 
-- Evaluation API (FastAPI), versioned datasets, evaluation runs
-- Deterministic guardrails and LLM-as-a-judge scoring
-- Regression detection, failure debugging, structured results
+- Evaluation API (FastAPI) for applications, datasets, policies, and runs
+- Regression detection, failure debugging
 - Background evaluation workers, observability
 
 See `project_context.md` for the full product context and phased implementation plan.
@@ -116,6 +117,87 @@ summary = await runner.run(
 
 Judge scoring, guardrails, and regression detection are **future phases** —
 not yet implemented.
+
+### Guardrails & scoring (Phase 6)
+
+Guardrails live in `src/evalyx/guardrails/` and depend only on the
+provider-neutral `LLMProvider` — never on OpenRouter/Ollama directly. Each
+guardrail returns a structured `GuardrailVerdict` (`name`, `type`, `passed`,
+`score`, `reason`, `metadata`) which the harness persists as a
+`GuardrailResult` row.
+
+Two kinds of checks:
+
+- **Deterministic indicators** (no LLM calls, regex-based):
+  - `pii` — detects email / phone / SSN-like patterns in the model output.
+    This is a *conservative indicator*, not a complete enterprise PII
+    detector. Metadata records only categories and counts — matched values
+    are never persisted.
+  - `prompt_injection` — detects obvious instruction-override, system-prompt
+    extraction, role-switch, and jailbreak patterns with normalized
+    (case-insensitive, whitespace-collapsed) matching. An *indicator*, not
+    proof of injection.
+- **LLM-judge evaluations** (semantic, use the run's `judge_model`):
+  - `instruction_following` — does the output follow the request's explicit
+    instructions and format?
+  - `hallucination` — are claims supported by the case's expected
+    output/reference material? (LLM-judge heuristic, not perfect detection;
+    skipped as an evaluation error when no reference material exists.)
+  - `safety` — narrow, explainable policy (hate/harassment, violence/self-harm,
+    explicit sexual content, illegal instructions, security bypass).
+
+Judges receive the evaluated model output as clearly delimited **untrusted
+data** (`<model_output>` tags) so a malicious output cannot rewrite the
+evaluation instructions, and must return strict JSON
+(`{"passed": bool, "score": 0.0–1.0, "reason": str}`). Malformed judge
+output, out-of-range scores, and provider failures become **evaluation
+errors** — they can never silently become a pass.
+
+Execution order and isolation:
+
+1. Deterministic checks run first (cheap, no LLM calls); judge checks after.
+   All configured guardrails run — no short-circuiting — so results keep
+   complete diagnostic information.
+2. One guardrail failing or erroring never prevents the others from running.
+3. Persistence is idempotent: a `(case_result, guardrail name)` is recorded
+   once (DB-enforced unique constraint); repeated scoring never duplicates
+   rows or re-invokes judges.
+
+Scoring policy (documented in `src/evalyx/guardrails/policy.py`):
+
+- **Critical guardrails** — `pii`, `safety`, `hallucination`. Any critical
+  failure transitions the case `executed → failed`.
+- **Non-critical guardrails** — `prompt_injection`, `instruction_following`.
+  Their failures are persisted as guardrail failures (visible for debugging)
+  but do not individually fail the case. The policy is config-driven;
+  stricter policies can promote them.
+- A guardrail **execution error** (judge timeout, invalid judge output) is
+  *not* a model failure: the case stays `executed` and is surfaced as
+  `evaluation_error_cases` in the summary. Execution failures (no model
+  output) stay `error`.
+
+Run summary counts are accurate and separated — e.g. 10 cases might yield
+8 `passed`, 1 `failed`, 1 `error` (execution) — and execution errors are
+never counted as semantic failures.
+
+End-to-end example:
+
+```python
+from evalyx.evaluation import EvaluationPipeline
+
+pipeline = EvaluationPipeline(provider=provider, session_factory=db.session_factory)
+summary = await pipeline.run_and_score(
+    application_id=...,
+    dataset_version_id=...,
+    agent_model=settings.evyx_agent_model,
+    judge_model=settings.evyx_judge_model,
+)
+print(summary.passed_cases, summary.failed_cases, summary.error_cases)
+```
+
+Known limitations (honest): regex PII/injection checks are indicators with
+known blind spots; judge verdicts are heuristic and model-dependent; guardrail
+execution is sequential (deliberate — free models are rate-limited).
 
 ### Database
 

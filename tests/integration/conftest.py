@@ -43,3 +43,13 @@ async def db_session(db_manager: DatabaseManager):
         )
     async with db_manager.session() as session:
         yield session
+
+
+@pytest.fixture
+async def clean_db(db_manager: DatabaseManager) -> AsyncIterator[DatabaseManager]:
+    """DatabaseManager with a truncated domain schema (clean slate per test)."""
+    async with db_manager.engine.begin() as conn:
+        await conn.execute(
+            text(f"TRUNCATE {', '.join(DOMAIN_TABLES)} RESTART IDENTITY CASCADE")
+        )
+    yield db_manager

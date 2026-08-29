@@ -11,6 +11,7 @@ from evalyx.db.models import (
     EvaluationCaseResult,
     EvaluationRun,
     GuardrailResult,
+    GuardrailStatus,
     RunStatus,
 )
 from evalyx.db.repositories.errors import NotFoundError
@@ -136,6 +137,7 @@ class EvaluationRepository:
         score: float | None = None,
         reason: str | None = None,
         metadata: dict | None = None,
+        status: GuardrailStatus | None = None,
     ) -> GuardrailResult:
         case_result = await session.get(EvaluationCaseResult, evaluation_case_result_id)
         if case_result is None:
@@ -143,10 +145,15 @@ class EvaluationRepository:
                 f"Evaluation case result {evaluation_case_result_id} does not exist."
             )
 
+        if status is None:
+            # Backward-compatible default: derive from the legacy bool.
+            status = GuardrailStatus.PASSED if passed else GuardrailStatus.FAILED
+
         guardrail_result = GuardrailResult(
             evaluation_case_result_id=evaluation_case_result_id,
             name=name,
             type=type,
+            status=status,
             passed=passed,
             score=score,
             reason=reason,
@@ -156,6 +163,19 @@ class EvaluationRepository:
         await session.commit()
         await session.refresh(guardrail_result)
         return guardrail_result
+
+    async def update_case_result_status(
+        self,
+        session: AsyncSession,
+        case_result: EvaluationCaseResult,
+        status: CaseStatus,
+    ) -> EvaluationCaseResult:
+        """Transition a case result's status (used by the scoring engine)."""
+        case_result.status = status
+        session.add(case_result)
+        await session.commit()
+        await session.refresh(case_result)
+        return case_result
 
     async def list_guardrail_results(
         self,

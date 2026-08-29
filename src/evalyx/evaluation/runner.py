@@ -63,18 +63,27 @@ class RunnerError(Exception):
 
 
 class EvaluationSummary(BaseModel):
-    """Structured outcome of one evaluation run execution."""
+    """Structured outcome of one evaluation run execution.
+
+    Counts are execution-oriented unless scoring ran: ``passed_cases`` and
+    ``evaluation_error_cases`` are filled by the Phase 6 scoring pipeline;
+    the bare execution runner leaves them at 0 (cases are ``executed``).
+    """
 
     run_id: uuid.UUID
     status: RunStatus
     total_cases: int
-    #: Cases that produced a provider response (not yet scored).
+    #: Cases that produced a provider response but are not yet scored.
     executed_cases: int
-    #: Cases that failed at the provider level.
+    #: Cases that failed at the provider level (execution errors).
     error_cases: int
-    #: Reserved for Phase 6 scoring; always 0 in Phase 5.
-    failed_cases: int
-    duration_ms: int
+    #: Cases that failed evaluation (critical guardrail failure).
+    failed_cases: int = 0
+    #: Cases whose evaluation succeeded (all critical guardrails passed).
+    passed_cases: int = 0
+    #: Cases where a guardrail could not execute (scoring incomplete).
+    evaluation_error_cases: int = 0
+    duration_ms: int = 0
 
 
 @dataclass(frozen=True)
