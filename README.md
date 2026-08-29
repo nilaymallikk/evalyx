@@ -2,7 +2,7 @@
 
 An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents.
 
-## Status: Phase 8 complete — regression detection & baseline comparison
+## Status: Phase 9 complete — REST API & HTTP application layer (FastAPI)
 
 ### Currently implemented
 
@@ -18,13 +18,13 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 - Scoring (`src/evalyx/evaluation/scoring.py`, `src/evalyx/evaluation/pipeline.py`) — combines guardrail verdicts into per-case outcomes (`executed → passed/failed`), keeps execution errors distinct, and produces accurate run summary counts; end-to-end orchestration via `EvaluationPipeline`
 - Background workers (`src/evalyx/worker/`) — Celery + Redis(transport) orchestration around the existing pipeline: `run_evaluation` task receives a `run_id`, executes the async pipeline through a controlled event-loop bridge, and keeps PostgreSQL authoritative for all evaluation state
 - Regression detection & baseline comparison (`src/evalyx/evaluation/regression/`) — deterministic, LLM-free comparison of two completed runs (baseline vs current): pass/failure/error rates, per-guardrail failure rates, latency, case-level transitions, and typed threshold policy producing persisted, idempotent `RegressionComparison` artifacts
+- REST API (`src/evalyx/api/`) — versioned FastAPI surface under `/api/v1` for applications, dataset/version management, test cases, asynchronous evaluation submission (Celery), run/case/guardrail inspection, and regression comparisons; centralized error mapping, pagination, typed request/response schemas, OpenAPI/Swagger UI
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
 
 ### Planned / future
 
-- Evaluation API (FastAPI) for applications, datasets, policies, and runs
 - Failure debugging
 - Observability
 
@@ -372,6 +372,133 @@ no noise floor); cross-version name matching trusts stable case names; the
 combined error rate treats provider and evaluation errors as one budget;
 JSONB summary storage means case findings are queried as JSON, not via a
 dedicated relational table.
+
+### REST API (Phase 9)
+
+All resource endpoints live under the versioned prefix **`/api/v1`**; the
+health endpoints stay outside the version. Swagger UI is served by FastAPI
+itself (no custom documentation system):
+
+```bash
+docker compose up -d                  # PostgreSQL + Redis
+uv run python main.py                 # API on http://127.0.0.1:8000
+uv run celery -A evalyx.worker.celery_app worker --loglevel=INFO   # worker
+# then open:
+#   http://127.0.0.1:8000/docs          (Swagger UI)
+#   http://127.0.0.1:8000/openapi.json  (OpenAPI schema)
+```
+
+Endpoint inventory:
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/applications` | register an application (201; duplicate name → 409) |
+| GET | `/api/v1/applications/{id}` | retrieve an application |
+| GET | `/api/v1/applications/{id}/versions` | list immutable versions |
+| POST | `/api/v1/applications/{id}/versions` | create a version (409 on duplicate label) |
+| POST | `/api/v1/datasets` | create a dataset |
+| GET | `/api/v1/datasets/{id}` | retrieve a dataset |
+| GET | `/api/v1/datasets/{id}/versions` | list versions (ordered by version) |
+| POST | `/api/v1/datasets/{id}/versions` | create an immutable version |
+| POST | `/api/v1/datasets/{id}/versions/{v}/cases` | add a test case |
+| GET | `/api/v1/datasets/{id}/versions/{v}/cases` | list test cases |
+| POST | `/api/v1/evaluations` | submit a background evaluation (**202 Accepted**) |
+| GET | `/api/v1/evaluations` | list run summaries (newest first) |
+| GET | `/api/v1/evaluations/{run_id}` | run status, metadata, case counts |
+| GET | `/api/v1/evaluations/{run_id}/results` | paginated case results + guardrails |
+| GET | `/api/v1/evaluations/{run_id}/guardrails` | flat paginated guardrail results |
+| GET | `/api/v1/evaluations/{run_id}/regressions` | comparisons involving the run |
+| POST | `/api/v1/regressions` | compare two completed runs (see Phase 8) |
+| GET | `/api/v1/regressions/{comparison_id}` | retrieve a persisted report |
+
+Semantics and conventions:
+
+- **Asynchronous evaluation**: `POST /api/v1/evaluations` persists the run
+  (status `pending`), commits, then enqueues the existing
+  `run_evaluation` Celery task with the run id, returning **202 Accepted**
+  with `run_id`, `task_id`, and `status_url`. The worker owns execution;
+  the API never calls the LLM. If enqueueing fails, the run is marked
+  `failed` and **503** is returned — the API never claims a job was queued
+  when it was not. Accepted consistency window: a crash after a successful
+  enqueue but before the HTTP response leaves a queued job that still
+  executes (an extra run, never a lost one).
+- **Submission idempotency**: deliberately not idempotent — a retried HTTP
+  request creates a new run. Treat any 2xx as success; a distributed
+  idempotency-key mechanism is explicitly deferred (schema change).
+- **PostgreSQL is authoritative**: run/case/guardrail state comes from
+  PostgreSQL; Redis holds only operational Celery task state.
+- **Errors**: one envelope, `{"error": {"code", "message"}}`; mapping —
+  404 `not_found`, 409 `duplicate_version`/`conflict`, 400
+  `invalid_comparison` (incompatible runs), 422 `validation_error`, 503
+  `evaluation_enqueue_failed`, 500 `internal_error` (generic; details only
+  in logs). A detected regression is a **200**, not an error.
+- **Pagination**: `limit` (1–200, default 50) + `offset` on list endpoints
+  with deterministic ordering and a stable `total`.
+- **Configuration policy**: `configuration`/`configuration_snapshot`
+  fields accept non-secret execution configuration only (temperature,
+  max tokens, prompt template ids, ...). Secret-looking keys are stripped
+  at the boundary *and* on read; provider credentials (`LLM_PROVIDER`,
+  `OPENROUTER_API_KEY`) are server-side environment configuration and are
+  never accepted from clients.
+- **Dataset versions are immutable**: there is no update endpoint for
+  version content — create a new version.
+
+Example workflow (curl; no secrets involved):
+
+```bash
+# 1. Create an application and version
+curl -s -X POST http://localhost:8000/api/v1/applications \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "support-assistant", "description": "demo"}'
+curl -s -X POST http://localhost:8000/api/v1/applications/<app_id>/versions \
+  -H 'Content-Type: application/json' \
+  -d '{"version": "v1", "configuration": {"prompt_template": "tpl-1"}}'
+
+# 2. Create a dataset, version, and test cases
+curl -s -X POST http://localhost:8000/api/v1/datasets \
+  -H 'Content-Type: application/json' -d '{"name": "support-dataset"}'
+curl -s -X POST http://localhost:8000/api/v1/datasets/<ds_id>/versions \
+  -H 'Content-Type: application/json' -d '{"version": 1}'
+curl -s -X POST http://localhost:8000/api/v1/datasets/<ds_id>/versions/1/cases \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "greeting", "input": {"prompt": "Say hello in one sentence."}}'
+
+# 3. Submit an evaluation (asynchronous; 202 Accepted)
+curl -s -X POST http://localhost:8000/api/v1/evaluations \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "application_id": "<app_id>",
+        "application_version_id": "<app_version_id>",
+        "dataset_version_id": "<dsv_id>",
+        "agent_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "judge_model": "minimax/minimax-m3:free",
+        "configuration_snapshot": {"temperature": 0.2, "max_tokens": 256}
+      }'
+# → {"run_id": "...", "status": "pending", "task_id": "...",
+#    "status_url": "/api/v1/evaluations/..."}
+
+# 4. Poll status, then inspect results and guardrails
+curl -s http://localhost:8000/api/v1/evaluations/<run_id>
+curl -s http://localhost:8000/api/v1/evaluations/<run_id>/results
+curl -s http://localhost:8000/api/v1/evaluations/<run_id>/guardrails
+
+# 5. Compare against a baseline run
+curl -s -X POST http://localhost:8000/api/v1/regressions \
+  -H 'Content-Type: application/json' \
+  -d '{"baseline_run_id": "<baseline>", "current_run_id": "<current>"}'
+# 200 with {"result": "regression_detected" | "no_regression" | "not_comparable", ...}
+```
+
+Security limitations (explicit, intentional for this phase):
+
+- **Authentication/authorization is not implemented yet.** The API is for
+  local development and portfolio demonstration; do not expose it to
+  untrusted networks. JWT/OAuth/API-key auth and RBAC are future
+  hardening.
+- No rate limiting and no CORS (permissive origins are not enabled).
+- Secrets are never accepted in request bodies; error responses never
+  include stack traces, SQL, filesystem paths, or provider payloads;
+  guardrail metadata contains categories/counts, never raw PII matches.
 
 ### Database
 

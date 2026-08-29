@@ -1,33 +1,51 @@
-"""Minimal Evalyx application with health-check foundations.
+"""Minimal Evalyx application with health checks and the versioned REST API.
 
-Phase 2 scope: liveness (`/health`) and dependency readiness
-(`/health/ready` for PostgreSQL and Redis). The full API layer arrives in a
-later phase; this module intentionally stays small.
+- ``/health`` and ``/health/ready`` (Phase 2 behavior, unchanged) live
+  outside the API version.
+- ``/api/v1/...`` carries the resource API (Phase 9): applications,
+  datasets, evaluations, regressions.
+
+The HTTP layer is orchestration only: routers delegate to repositories and
+domain services; no LLM, guardrail, scoring, regression, or Celery
+execution logic lives here. PostgreSQL/Redis connections are owned by the
+single ``DatabaseManager``/redis client created at startup (one engine,
+never one per request).
 """
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
 from redis.asyncio import Redis
 
+from evalyx.api.errors import register_error_handlers
+from evalyx.api.routers import api_router
 from evalyx.core.config import Settings, get_settings
 from evalyx.core.logging import configure_logging
 from evalyx.db.redis import check_redis, create_redis_client
 from evalyx.db.session import DatabaseManager
 
+API_VERSION = "1.0.0"
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    database: DatabaseManager | None = None,
+    redis_client: Redis | None = None,
+) -> FastAPI:
     """Create the Evalyx FastAPI application.
 
-    Accepting ``settings`` explicitly keeps the app testable and avoids
-    hidden global configuration.
+    Accepting ``settings`` (and optionally pre-built infrastructure) keeps
+    the app testable and avoids hidden global configuration. By default the
+    engine, session factory, and Redis client are created here exactly once
+    per application.
     """
     settings = settings or get_settings()
     configure_logging(settings)
 
-    database = DatabaseManager(settings)
-    redis_client: Redis = create_redis_client(settings)
+    database = database or DatabaseManager(settings)
+    redis_client = redis_client or create_redis_client(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -35,17 +53,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await database.dispose()
         await redis_client.aclose()
 
-    app = FastAPI(title="Evalyx", lifespan=lifespan)
+    app = FastAPI(
+        title="Evalyx",
+        version=API_VERSION,
+        description=(
+            "AI evaluation and reliability platform: register applications, "
+            "version datasets, submit background evaluations, inspect "
+            "results, and compare runs for regressions. All resource "
+            "endpoints live under the `/api/v1` prefix. "
+            "Authentication/authorization is **not implemented yet** — this "
+            "API is intended for local development and portfolio use."
+        ),
+        lifespan=lifespan,
+    )
     app.state.settings = settings
     app.state.database = database
     app.state.redis = redis_client
 
-    @app.get("/health")
+    register_error_handlers(app)
+    app.include_router(api_router)
+
+    @app.get("/health", tags=["health"])
     async def health() -> dict[str, str]:
         """Liveness: the application process is running."""
         return {"status": "ok"}
 
-    @app.get("/health/ready")
+    @app.get("/health/ready", tags=["health"])
     async def readiness(response: Response) -> dict[str, object]:
         """Readiness: application dependencies are healthy."""
         database_ok = await database.check()

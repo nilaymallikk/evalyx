@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalyx.db.models import (
@@ -114,16 +114,69 @@ class EvaluationRepository:
     ) -> EvaluationCaseResult | None:
         return await session.get(EvaluationCaseResult, case_result_id)
 
+    async def list_runs(
+        self,
+        session: AsyncSession,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        application_id: uuid.UUID | None = None,
+    ) -> list[EvaluationRun]:
+        """List runs newest first, optionally filtered by application.
+
+        ``limit``/``offset`` back API pagination; ``None`` (repository
+        default) preserves the unpaginated behavior for internal callers.
+        Ordering: ``created_at`` descending, ``id`` descending as a stable
+        tiebreaker.
+        """
+        query = select(EvaluationRun).order_by(
+            EvaluationRun.created_at.desc(), EvaluationRun.id.desc()
+        )
+        if application_id is not None:
+            query = query.where(EvaluationRun.application_id == application_id)
+        if offset:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
+        result = await session.execute(query)
+        return list(result.scalars().all())
+
+    async def count_case_results_by_status(
+        self,
+        session: AsyncSession,
+        run_id: uuid.UUID,
+    ) -> dict[CaseStatus, int]:
+        """Case-result counts grouped by status in one query."""
+        result = await session.execute(
+            select(EvaluationCaseResult.status, func.count())
+            .where(EvaluationCaseResult.evaluation_run_id == run_id)
+            .group_by(EvaluationCaseResult.status)
+        )
+        return {status: count for status, count in result.all()}
+
     async def list_case_results(
         self,
         session: AsyncSession,
         run_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[EvaluationCaseResult]:
-        result = await session.execute(
+        """Case results for a run, oldest first (stable page order).
+
+        ``limit``/``offset`` back API pagination; ``None`` (repository
+        default) preserves the unpaginated behavior for internal callers.
+        """
+        query = (
             select(EvaluationCaseResult)
             .where(EvaluationCaseResult.evaluation_run_id == run_id)
-            .order_by(EvaluationCaseResult.created_at)
+            .order_by(EvaluationCaseResult.created_at, EvaluationCaseResult.id)
         )
+        if offset:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
+        result = await session.execute(query)
         return list(result.scalars().all())
 
     async def add_guardrail_result(
@@ -193,19 +246,46 @@ class EvaluationRepository:
         self,
         session: AsyncSession,
         run_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[GuardrailResult]:
         """All guardrail results for a run in one query (batched loading).
 
         Ordered deterministically by creation time; used by the regression
-        service to avoid per-case queries.
+        service and the API to avoid per-case queries. ``limit``/``offset``
+        back API pagination; ``None`` (default) preserves unpaginated
+        behavior for internal callers.
         """
-        result = await session.execute(
+        query = (
             select(GuardrailResult)
             .join(
                 EvaluationCaseResult,
                 GuardrailResult.evaluation_case_result_id == EvaluationCaseResult.id,
             )
             .where(EvaluationCaseResult.evaluation_run_id == run_id)
-            .order_by(GuardrailResult.created_at)
+            .order_by(GuardrailResult.created_at, GuardrailResult.id)
         )
+        if offset:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
+        result = await session.execute(query)
         return list(result.scalars().all())
+
+    async def count_guardrail_results_for_run(
+        self,
+        session: AsyncSession,
+        run_id: uuid.UUID,
+    ) -> int:
+        """Total guardrail-result count for a run (pagination support)."""
+        result = await session.execute(
+            select(func.count())
+            .select_from(GuardrailResult)
+            .join(
+                EvaluationCaseResult,
+                GuardrailResult.evaluation_case_result_id == EvaluationCaseResult.id,
+            )
+            .where(EvaluationCaseResult.evaluation_run_id == run_id)
+        )
+        return int(result.scalar_one())

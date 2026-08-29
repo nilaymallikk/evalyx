@@ -70,3 +70,16 @@ class ApplicationRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_versions(
+        self,
+        session: AsyncSession,
+        application_id: uuid.UUID,
+    ) -> list[ApplicationVersion]:
+        """All versions of an application in creation order."""
+        result = await session.execute(
+            select(ApplicationVersion)
+            .where(ApplicationVersion.application_id == application_id)
+            .order_by(ApplicationVersion.created_at, ApplicationVersion.version)
+        )
+        return list(result.scalars().all())
