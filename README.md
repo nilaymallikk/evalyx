@@ -2,7 +2,7 @@
 
 An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents.
 
-## Status: Phase 7 complete — background evaluation workers (Celery + Redis)
+## Status: Phase 8 complete — regression detection & baseline comparison
 
 ### Currently implemented
 
@@ -17,6 +17,7 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 - Guardrails (`src/evalyx/guardrails/`) — provider-neutral `Guardrail` abstraction; deterministic PII and prompt-injection indicators; LLM-judge evaluation of instruction following, hallucination/unsupported claims, and safety; a harness with per-guardrail failure isolation and idempotent persistence
 - Scoring (`src/evalyx/evaluation/scoring.py`, `src/evalyx/evaluation/pipeline.py`) — combines guardrail verdicts into per-case outcomes (`executed → passed/failed`), keeps execution errors distinct, and produces accurate run summary counts; end-to-end orchestration via `EvaluationPipeline`
 - Background workers (`src/evalyx/worker/`) — Celery + Redis(transport) orchestration around the existing pipeline: `run_evaluation` task receives a `run_id`, executes the async pipeline through a controlled event-loop bridge, and keeps PostgreSQL authoritative for all evaluation state
+- Regression detection & baseline comparison (`src/evalyx/evaluation/regression/`) — deterministic, LLM-free comparison of two completed runs (baseline vs current): pass/failure/error rates, per-guardrail failure rates, latency, case-level transitions, and typed threshold policy producing persisted, idempotent `RegressionComparison` artifacts
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
@@ -24,7 +25,7 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 ### Planned / future
 
 - Evaluation API (FastAPI) for applications, datasets, policies, and runs
-- Regression detection, failure debugging
+- Failure debugging
 - Observability
 
 See `project_context.md` for the full product context and phased implementation plan.
@@ -284,6 +285,93 @@ uv run python examples/submit_background_evaluation.py
 The broker and result backend are derived from the existing `REDIS_URL`; no
 separate Celery URLs are configured, and no additional Redis container is
 needed.
+
+### Regression detection & baseline comparison (Phase 8)
+
+Phase 8 answers one question with evidence: *did the current version of the
+AI application regress compared with the baseline?* The logic is **pure
+Python + PostgreSQL** — it never calls an LLM, never touches OpenRouter,
+never depends on Celery, and is fully deterministic: the same two runs with
+the same policy always produce the same artifact byte-for-byte.
+
+Concepts:
+
+- **Baseline** — the reference `EvaluationRun` (older version, known-good
+  state). **Current** — the run under evaluation. Both must be `completed`,
+  belong to the **same application**, and reference versions of the **same
+  dataset**. Runs are compared, never modified — history stays immutable.
+- **Case matching** — same dataset version: cases are matched by
+  `test_case_id`. Cross-version (e.g. v1 → v2 of one dataset): matched by
+  test-case **name**, which must stay stable across versions (a documented
+  requirement, since each version snapshots its own `TestCase` rows).
+- **Metrics** — pass rate and failure rate over *evaluated* cases
+  (passed + failed); execution-error rate (provider failures, status
+  `error`), evaluation-error rate (cases whose evaluation could not
+  complete), and a combined `error_rate` over *total* cases; average
+  latency over non-null observations; per-guardrail failure rate over its
+  passed+failed verdicts (guardrail errors/absence counted separately).
+  Comparison metrics are computed over **matched cases only**, so new or
+  removed cases never distort rates — they are reported separately.
+- **Case-level detection** — a full transition matrix per matched case:
+  `newly_failed`, `newly_errored`, `fixed`, `stable_failure`,
+  `error_transition`, `recovered`, plus `new_cases`, `removed_cases`, and
+  `missing_case_results` (dataset cases that produced no result — absence
+  of evidence is surfaced explicitly, never invented into a pass or fail).
+
+Threshold policy (typed, unit-explicit, frozen per artifact):
+
+| Threshold | Unit | Default | Meaning |
+|---|---|---|---|
+| `max_pass_rate_drop_pp` | percentage points | `2.0` | pass rate fell by more than this |
+| `max_error_rate_increase_pp` | percentage points | `2.0` | combined error rate rose by more than this |
+| `max_guardrail_failure_rate_increase_pp` | percentage points | `2.0` | any guardrail's failure rate rose by more than this |
+| `max_latency_increase_percent` | percent (relative) | `20.0` / disabled | average latency rose by more than this |
+
+A violation requires the delta to be **strictly worse** than the threshold
+(exactly equal → not a regression). Rates are percentages (0–100), deltas
+in percentage points, latency delta in relative percent. The policy is
+versioned (`comparison_version = "1"`) and fingerprinted (SHA-256 over the
+canonical JSON of version + thresholds); the fingerprint is part of the
+uniqueness key so re-running with a changed policy creates a new artifact
+instead of overwriting history.
+
+Decision: `REGRESSION_DETECTED` (≥1 violation), `NO_REGRESSION`, or
+`NOT_COMPARABLE` (either side has no evaluated cases — no denominator).
+Every artifact persists the threshold snapshot, metric deltas, case
+findings, guardrail comparisons, configuration diff (secret-looking keys
+sanitized), and the run context. Comparing a run with itself is rejected by
+both the service and a database CHECK constraint; referenced runs cannot be
+deleted while a comparison exists (FK RESTRICT).
+
+Example — a regression detected through the service:
+
+```python
+from evalyx.db.session import DatabaseManager
+from evalyx.evaluation.regression import RegressionService, RegressionThresholds
+
+db = DatabaseManager(settings)
+service = RegressionService(db.session_factory)
+
+report = await service.compare_runs(baseline_run_id, current_run_id)  # defaults
+if report.regression_detected:
+    for v in report.threshold_violations:
+        print(v.metric, v.delta, v.detail)      # e.g. pass_rate 2.777778 pp ...
+    print("newly failed:", [f.name for f in report.newly_failed_cases])
+    print("newly errored:", [f.name for f in report.newly_errored_cases])
+print(report.result)  # REGRESSION_DETECTED | NO_REGRESSION | NOT_COMPARABLE
+```
+
+Re-running the same comparison returns the **same artifact** (same id, same
+`created_at`) — idempotent by design; the persisted summary is recomputed
+and verified identical. `list_for_run` finds every comparison a run
+participated in, on either side.
+
+Known limitations (deliberate): threshold-based only — a delta crossing a
+threshold is *not* statistical significance testing (no sample-size model,
+no noise floor); cross-version name matching trusts stable case names; the
+combined error rate treats provider and evaluation errors as one budget;
+JSONB summary storage means case findings are queried as JSON, not via a
+dedicated relational table.
 
 ### Database
 

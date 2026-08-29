@@ -14,18 +14,21 @@ from evalyx.db.models.evaluation import (
     RunStatus,
 )
 from evalyx.db.models.guardrail import GuardrailResult, GuardrailStatus
+from evalyx.db.models.regression import ComparisonResult, RegressionComparison
 
 __all__ = [
     "Application",
     "ApplicationVersion",
     "Base",
     "CaseStatus",
+    "ComparisonResult",
     "Dataset",
     "DatasetVersion",
     "EvaluationCaseResult",
     "EvaluationRun",
     "GuardrailResult",
     "GuardrailStatus",
+    "RegressionComparison",
     "RunStatus",
     "TestCase",
 ]

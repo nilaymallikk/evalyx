@@ -13,6 +13,7 @@ from evalyx.db.repositories.errors import (
     RepositoryError,
 )
 from evalyx.db.repositories.evaluation import EvaluationRepository
+from evalyx.db.repositories.regression import RegressionRepository
 
 __all__ = [
     "ApplicationRepository",
@@ -20,5 +21,6 @@ __all__ = [
     "DuplicateVersionError",
     "EvaluationRepository",
     "NotFoundError",
+    "RegressionRepository",
     "RepositoryError",
 ]

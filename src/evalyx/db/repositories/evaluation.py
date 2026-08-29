@@ -188,3 +188,24 @@ class EvaluationRepository:
             .order_by(GuardrailResult.created_at)
         )
         return list(result.scalars().all())
+
+    async def list_guardrail_results_for_run(
+        self,
+        session: AsyncSession,
+        run_id: uuid.UUID,
+    ) -> list[GuardrailResult]:
+        """All guardrail results for a run in one query (batched loading).
+
+        Ordered deterministically by creation time; used by the regression
+        service to avoid per-case queries.
+        """
+        result = await session.execute(
+            select(GuardrailResult)
+            .join(
+                EvaluationCaseResult,
+                GuardrailResult.evaluation_case_result_id == EvaluationCaseResult.id,
+            )
+            .where(EvaluationCaseResult.evaluation_run_id == run_id)
+            .order_by(GuardrailResult.created_at)
+        )
+        return list(result.scalars().all())
