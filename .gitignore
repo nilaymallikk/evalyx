@@ -22,3 +22,6 @@ build/
 
 .coverage
 htmlcov/
+
+# AI tooling session artifacts
+.claude-flow/

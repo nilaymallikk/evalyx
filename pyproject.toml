@@ -1,7 +1,7 @@
 [project]
 name = "evalyx"
 version = "0.1.0"
-description = "Add your description here"
+description = "An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -32,3 +32,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.5",
 ]
+
+[tool.pytest.ini_options]
+# Unit tests live in tests/. test_openrouter.py at the repo root is a
+# standalone connectivity script, not a pytest module — keep it out of
+# test collection.
+testpaths = ["tests"]
