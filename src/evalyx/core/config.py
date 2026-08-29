@@ -14,6 +14,8 @@ Rules:
 from functools import lru_cache
 from typing import Literal
 
+from typing import Literal
+
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -43,6 +45,9 @@ class Settings(BaseSettings):
     # Application
     app_env: Environment = "development"
     log_level: LogLevel = "INFO"
+
+    # LLM provider selection (azure_openai is a future provider)
+    llm_provider: Literal["openrouter", "ollama"] = "openrouter"
 
     # Database (local Docker PostgreSQL: host 5433 -> container 5432)
     database_url: str = "postgresql+asyncpg://evalyx:evalyx@localhost:5433/evalyx"

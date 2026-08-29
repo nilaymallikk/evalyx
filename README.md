@@ -12,6 +12,7 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 - PostgreSQL/Redis connection foundations (`src/evalyx/db/`) — async SQLAlchemy engine + Redis client, connectivity checks
 - Domain model + Alembic migrations (`src/evalyx/db/models/`, `migrations/`): applications, application versions, datasets, dataset versions, test cases, evaluation runs, case results, guardrail results
 - Repository layer (`src/evalyx/db/repositories/`) — async data access for the domain
+- LLM provider abstraction (`src/evalyx/llm/`) — provider-neutral `LLMProvider` protocol + typed `LLMResponse`, async OpenRouter and Ollama implementations, bounded retries, typed error hierarchy, provider factory
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
@@ -43,6 +44,30 @@ Health endpoints: `GET /health` (liveness), `GET /health/ready` (PostgreSQL + Re
 uv run pytest                                  # unit tests (no network, no live services)
 EVALYX_RUN_INTEGRATION_TESTS=1 uv run pytest   # + live PostgreSQL/Redis integration tests
 ```
+
+### LLM providers
+
+Evalyx calls models through a provider-agnostic interface
+(`src/evalyx/llm/base.py`), selected via `LLM_PROVIDER` in `.env`:
+
+| Provider | Status | Notes |
+|---|---|---|
+| `openrouter` | Implemented (`src/evalyx/llm/openrouter.py`) | Default; async `httpx`, bounded retries, typed errors |
+| `ollama` | Implemented (`src/evalyx/llm/ollama.py`) | Optional/local; set `LLM_PROVIDER=ollama` and `OLLAMA_BASE_URL` |
+| `azure_openai` | **Future** — not implemented | The interface is designed so it can be added without touching callers |
+
+Defaults are the project's **free** OpenRouter models (`EVALYX_AGENT_MODEL`,
+`EVALYX_JUDGE_MODEL` in `.env.example`); no paid-model fallback exists.
+
+Provider unit tests are fully mocked (`uv run pytest` — no network). An
+optional live OpenRouter test is double-gated:
+
+```bash
+EVALYX_RUN_INTEGRATION_TESTS=1 EVALYX_RUN_LLM_INTEGRATION_TESTS=1 uv run pytest
+```
+
+For local Ollama: install Ollama, pull a model, then point
+`OLLAMA_BASE_URL=http://localhost:11434` and set `LLM_PROVIDER=ollama`.
 
 ### Database
 
