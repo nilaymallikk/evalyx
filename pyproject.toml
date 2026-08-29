@@ -45,6 +45,13 @@ markers = [
     "integration: requires live PostgreSQL/Redis (set EVALYX_RUN_INTEGRATION_TESTS=1)",
 ]
 
+[tool.mypy]
+# Celery and billiard ship no type stubs or py.typed marker.
+overrides = [
+    { module = "celery.*", ignore_missing_imports = true },
+    { module = "billiard.*", ignore_missing_imports = true },
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

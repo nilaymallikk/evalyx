@@ -61,6 +61,17 @@ class EvaluationPipeline:
         )
         return await self.score_existing_run(execution.run_id)
 
+    async def execute_and_score_existing_run(self, run_id: uuid.UUID) -> EvaluationSummary:
+        """Execute an existing pending/partially-executed run, then score it.
+
+        Entry point for background workers: the run already exists (created by
+        the caller), so execution goes through the runner's resume semantics —
+        cases that already have a result are skipped and terminal runs are
+        rejected by the runner.
+        """
+        await self._runner.execute_run(run_id)
+        return await self.score_existing_run(run_id)
+
     async def score_existing_run(self, run_id: uuid.UUID) -> EvaluationSummary:
         """Run guardrails + scoring over an already-executed run."""
         if self._needs_judge_model:

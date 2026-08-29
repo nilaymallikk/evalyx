@@ -66,6 +66,35 @@ class Settings(BaseSettings):
     # Optional local Ollama
     ollama_base_url: str = "http://localhost:11434"
 
+    # Background worker (Phase 7). Broker/backend URLs derive from REDIS_URL —
+    # see celery_broker_url / celery_result_backend below. Concurrency stays
+    # conservative: free OpenRouter models are rate-limited.
+    worker_concurrency: int = 2
+    worker_max_retries: int = 3
+    worker_retry_backoff_seconds: float = 10.0
+    worker_retry_max_backoff_seconds: float = 300.0
+    worker_soft_time_limit_seconds: int = 3600
+    worker_hard_time_limit_seconds: int = 3900
+    worker_result_ttl_seconds: int = 86400
+
+    @model_validator(mode="after")
+    def _validate_worker_settings(self) -> Settings:
+        if self.worker_hard_time_limit_seconds <= self.worker_soft_time_limit_seconds:
+            raise ValueError(
+                "WORKER_HARD_TIME_LIMIT_SECONDS must be greater than "
+                "WORKER_SOFT_TIME_LIMIT_SECONDS."
+            )
+        if self.worker_max_retries < 0:
+            raise ValueError("WORKER_MAX_RETRIES must be >= 0.")
+        if self.worker_retry_backoff_seconds <= 0 or self.worker_retry_max_backoff_seconds <= 0:
+            raise ValueError("Worker retry backoff values must be positive.")
+        if self.worker_retry_max_backoff_seconds < self.worker_retry_backoff_seconds:
+            raise ValueError(
+                "WORKER_RETRY_MAX_BACKOFF_SECONDS must be >= "
+                "WORKER_RETRY_BACKOFF_SECONDS."
+            )
+        return self
+
     @model_validator(mode="after")
     def _validate_secrets(self) -> "Settings":
         """Fail fast with clear errors on unsafe secret configuration."""
@@ -87,6 +116,29 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.app_env == "development"
+
+    @property
+    def celery_broker_url(self) -> str:
+        """Celery broker URL, derived from REDIS_URL (no duplicate setting)."""
+        return self.redis_url
+
+    @property
+    def celery_result_backend(self) -> str:
+        """Celery result backend URL, derived from REDIS_URL.
+
+        Only operational task state (PENDING/STARTED/RETRY/...) lives here;
+        PostgreSQL remains the source of truth for evaluation results.
+        """
+        return self.redis_url
+
+    @property
+    def worker_visibility_timeout_seconds(self) -> int:
+        """Redis visibility timeout for Celery messages.
+
+        Must stay well above the hard task time limit, or Redis would
+        redeliver a message while its task is still executing.
+        """
+        return max(3600, self.worker_hard_time_limit_seconds * 2)
 
 
 @lru_cache
