@@ -5,6 +5,7 @@ description = "An AI evaluation and reliability platform for testing, observing,
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+
     "alembic>=1.19.1",
     "asyncpg>=0.31.0",
     "celery>=5.6.3",
@@ -38,3 +39,14 @@ dev = [
 # standalone connectivity script, not a pytest module — keep it out of
 # test collection.
 testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration: requires live PostgreSQL/Redis (set EVALYX_RUN_INTEGRATION_TESTS=1)",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evalyx"]
