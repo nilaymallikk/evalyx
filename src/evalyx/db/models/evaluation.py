@@ -9,6 +9,7 @@ snapshot the evaluated input and expected output.
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     DateTime,
@@ -22,6 +23,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from evalyx.db.models.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
+
+if TYPE_CHECKING:
+    from evalyx.db.models.application import Application
+    from evalyx.db.models.dataset import DatasetVersion, TestCase
+    from evalyx.db.models.guardrail import GuardrailResult
 
 
 class RunStatus(enum.Enum):
@@ -40,6 +46,9 @@ class CaseStatus(enum.Enum):
     PASSED = "passed"
     FAILED = "failed"
     ERROR = "error"
+    #: Execution succeeded but no scoring criterion has been applied yet.
+    #: Phase 6 (guardrails/judge) transitions EXECUTED to PASSED/FAILED.
+    EXECUTED = "executed"
 
 
 def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:

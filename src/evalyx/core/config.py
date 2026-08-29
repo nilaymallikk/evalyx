@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # Security
-    evalyx_secret_key: SecretStr
+    evalyx_secret_key: SecretStr = SecretStr("")
 
     # OpenRouter
     openrouter_api_key: SecretStr = SecretStr("")

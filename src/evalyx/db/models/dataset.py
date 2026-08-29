@@ -58,8 +58,13 @@ class DatasetVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 
 class TestCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """A single evaluation case belonging to one immutable dataset version."""
+    """A single evaluation case belonging to one immutable dataset version.
 
+    ``__test__ = False`` keeps pytest from trying to collect this ORM model
+    as a test class (name matches the default ``Test*`` pattern).
+    """
+
+    __test__ = False  # pytest: noqa
     __tablename__ = "test_cases"
 
     dataset_version_id: Mapped[uuid.UUID] = mapped_column(

@@ -13,6 +13,7 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 - Domain model + Alembic migrations (`src/evalyx/db/models/`, `migrations/`): applications, application versions, datasets, dataset versions, test cases, evaluation runs, case results, guardrail results
 - Repository layer (`src/evalyx/db/repositories/`) — async data access for the domain
 - LLM provider abstraction (`src/evalyx/llm/`) — provider-neutral `LLMProvider` protocol + typed `LLMResponse`, async OpenRouter and Ollama implementations, bounded retries, typed error hierarchy, provider factory
+- Evaluation engine (`src/evalyx/evaluation/`) — executes a run's pinned dataset version through the injected `LLMProvider`, persists per-case results (status `executed`/`error` — scoring is Phase 6), returns a typed run summary
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
@@ -68,6 +69,53 @@ EVALYX_RUN_INTEGRATION_TESTS=1 EVALYX_RUN_LLM_INTEGRATION_TESTS=1 uv run pytest
 
 For local Ollama: install Ollama, pull a model, then point
 `OLLAMA_BASE_URL=http://localhost:11434` and set `LLM_PROVIDER=ollama`.
+
+### Evaluation engine
+
+`EvaluationRunner` (in `src/evalyx/evaluation/`) executes one run against
+the provider it is given (never a concrete provider directly). Flow:
+pinned `DatasetVersion` → load `TestCase`s → `provider.complete(...)` using
+the run's recorded `agent_model` and `configuration_snapshot`
+(`temperature`, `max_tokens`, `system`) → persist one
+`EvaluationCaseResult` per case → complete the run.
+
+Semantics (Phase 5 — execution only):
+
+- Result statuses are execution-honest: a case that produced a provider
+  response is `executed`; provider failures are `error` with a safe
+  provider-error category. `passed`/`failed` arrive with Phase 6 scoring.
+- Individual case failures never stop the run; even if every case errors,
+  the run `completes`. `failed` is reserved for catastrophic runner-level
+  failures (e.g. persistence errors). Empty dataset versions complete with
+  zero results.
+- Each test case is executed exactly once per run (unique
+  `(run, test_case)` constraint); re-executing a completed run raises.
+- Execution is sequential by design (free models are rate-limited).
+
+Programmatic example:
+
+```python
+from evalyx.core.config import get_settings
+from evalyx.db.session import DatabaseManager
+from evalyx.evaluation import EvaluationRunner
+from evalyx.llm.factory import create_provider
+
+settings = get_settings()
+db = DatabaseManager(settings)
+provider = create_provider(settings)   # OpenRouter (default)
+
+runner = EvaluationRunner(provider, db.session_factory)
+summary = await runner.run(
+    application_id=...,
+    dataset_version_id=...,
+    agent_model=settings.evyx_agent_model,
+    judge_model=settings.evyx_judge_model,
+    configuration_snapshot={"temperature": 0.2, "max_tokens": 500},
+)
+```
+
+Judge scoring, guardrails, and regression detection are **future phases** —
+not yet implemented.
 
 ### Database
 

@@ -6,12 +6,16 @@ Phase 6; this schema only persists its outcomes.
 """
 
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from evalyx.db.models.base import Base, CreatedAtMixin, UUIDPrimaryKeyMixin
+
+if TYPE_CHECKING:
+    from evalyx.db.models.evaluation import EvaluationCaseResult
 
 
 class GuardrailResult(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
