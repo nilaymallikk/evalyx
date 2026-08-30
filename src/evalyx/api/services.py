@@ -105,6 +105,17 @@ class EvaluationService:
                 "The evaluation run was created but could not be queued. "
                 "The run was marked failed; retry submission with a new request.",
             ) from exc
+        # Request → run → task correlation event. Safe fields only (ids and
+        # model name); the request_id is merged automatically from the
+        # correlation context. Prompts/outputs/secrets are never logged.
+        logger.info(
+            "evaluation_submitted",
+            run_id=str(run.id),
+            task_id=task_id,
+            application_id=str(run.application_id),
+            dataset_version_id=str(run.dataset_version_id),
+            agent_model=run.agent_model,
+        )
         return run, task_id
 
     async def _create_run(self, session: AsyncSession, request: EvaluationCreate) -> EvaluationRun:

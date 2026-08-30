@@ -12,9 +12,12 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from structlog.testing import capture_logs
 
 import evalyx
+from evalyx.core import context as correlation
 from evalyx.core.config import Settings
+from evalyx.core.metrics import metrics
 from evalyx.db.models import RunStatus
 from evalyx.evaluation.runner import EvaluationSummary, RunnerError
 from evalyx.llm.errors import LLMConfigurationError, LLMRateLimitError
@@ -436,3 +439,102 @@ async def test_runner_error_with_now_completed_run_rescores_instead():
 
     assert result["action"] == "rescored"
     assert pipeline.score_calls == 1
+
+
+# -- observability: correlation & metrics (Phase 10) --------------------------
+
+
+def test_task_logs_carry_task_id_and_run_id(monkeypatch):
+    """§36: worker lifecycle events include task_id and run_id; no secrets,
+    prompts, outputs, or Authorization headers ever appear."""
+    run_id = uuid.uuid4()
+
+    async def ok(run_id_arg, settings, **kwargs):
+        return summary_dict(run_id_arg)
+
+    monkeypatch.setattr("evalyx.worker.tasks.execute_evaluation", ok)
+    metrics.reset()
+    with capture_logs() as logs:
+        run_evaluation.apply(args=[str(run_id)], throw=True)
+
+    received = [e for e in logs if e["event"] == "task_received"]
+    completed = [e for e in logs if e["event"] == "task_completed"]
+    assert len(received) == 1 and len(completed) == 1
+    assert received[0]["run_id"] == str(run_id)
+    assert completed[0]["run_id"] == str(run_id)
+    assert received[0]["task_id"]  # eager mode still assigns an id
+    assert received[0]["task_id"] == completed[0]["task_id"]
+
+    serialized = str(logs)
+    for forbidden in ("OPENROUTER_API_KEY", "fake-api-key", "Authorization", "Bearer "):
+        assert forbidden not in serialized
+
+
+def test_task_failure_logs_error_type_not_message(monkeypatch):
+    run_id = uuid.uuid4()
+
+    async def boom(run_id_arg, settings, **kwargs):
+        raise PermanentEvaluationError(
+            f"secret probe value {run_id_arg} - details must not leak"
+        )
+
+    monkeypatch.setattr("evalyx.worker.tasks.execute_evaluation", boom)
+    metrics.reset()
+    with capture_logs() as logs, pytest.raises(PermanentEvaluationError):
+        run_evaluation.apply(args=[str(run_id)], throw=True)
+    failed = [e for e in logs if e["event"] == "task_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error"] == "PermanentEvaluationError"  # type only
+    assert "secret probe value" not in str(logs)  # message never logged
+    metrics.reset()
+
+
+def test_task_metrics_recorded_per_outcome(monkeypatch):
+    run_id = uuid.uuid4()
+
+    async def ok(run_id_arg, settings, **kwargs):
+        return summary_dict(run_id_arg)
+
+    monkeypatch.setattr("evalyx.worker.tasks.execute_evaluation", ok)
+    metrics.reset()
+    run_evaluation.apply(args=[str(run_id)], throw=True)
+    snap = metrics.snapshot()
+    outcomes = {e["labels"]["outcome"]: e["value"] for e in snap["worker_tasks_total"]}
+    assert outcomes == {"success": 1.0}
+    failures = snap.get("worker_task_failures_total", [])
+    assert failures == []  # success produces no failure counter
+    # Correlation ids are never metric labels (§38).
+    assert "task_id" not in str(snap["worker_tasks_total"][0]["labels"])
+    assert str(run_id) not in str(snap)
+    metrics.reset()
+
+
+def test_task_failure_metrics_recorded(monkeypatch):
+    run_id = uuid.uuid4()
+
+    async def boom(run_id_arg, settings, **kwargs):
+        raise PermanentEvaluationError("nope")
+
+    monkeypatch.setattr("evalyx.worker.tasks.execute_evaluation", boom)
+    metrics.reset()
+    with capture_logs(), pytest.raises(PermanentEvaluationError):
+        run_evaluation.apply(args=[str(run_id)], throw=True)
+    snap = metrics.snapshot()
+    outcomes = {e["labels"]["outcome"]: e["value"] for e in snap["worker_tasks_total"]}
+    assert outcomes == {"failed": 1.0}
+    assert snap["worker_task_failures_total"][0]["value"] == 1.0
+    assert snap["worker_task_failures_total"][0]["labels"] == {"task": "run_evaluation"}
+    metrics.reset()
+
+
+def test_task_context_cleared_after_execution(monkeypatch):
+    """§31: the correlation context never leaks into the next task."""
+    run_id = uuid.uuid4()
+
+    async def ok(run_id_arg, settings, **kwargs):
+        return summary_dict(run_id_arg)
+
+    monkeypatch.setattr("evalyx.worker.tasks.execute_evaluation", ok)
+    run_evaluation.apply(args=[str(run_id)], throw=True)
+    assert correlation.get_run_id() is None
+    assert correlation.get_task_id() is None

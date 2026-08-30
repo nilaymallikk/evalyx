@@ -14,6 +14,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from evalyx.core.metrics import metrics
 from evalyx.db.models import CaseStatus, GuardrailStatus
 from evalyx.db.repositories import EvaluationRepository
 from evalyx.evaluation.runner import EvaluationRunner, EvaluationSummary, RunnerError
@@ -91,6 +92,18 @@ class EvaluationPipeline:
 
         scoring = ScoringEngine(self._session_factory, policy=self._policy)
         counts = await scoring.score_run(run_id)
+
+        # Case-level metrics: final statuses are bounded labels (never case
+        # or run identifiers). "error" additionally feeds the dedicated
+        # error counter — a quality failure ("failed") is not an error.
+        for status_name, count in counts.items():
+            if count == 0:
+                continue  # only record statuses that actually occurred
+            metrics.increment("evaluation_cases_total", {"status": status_name}, value=count)
+            if status_name == "error":
+                metrics.increment(
+                    "evaluation_case_errors_total", {"status": status_name}, value=count
+                )
 
         run_status = await self._load_run_status(run_id)
         if run_status is None:

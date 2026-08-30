@@ -43,6 +43,7 @@ import structlog
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evalyx.core.metrics import metrics
 from evalyx.db.models import CaseStatus, RunStatus, TestCase
 from evalyx.db.repositories import DatasetRepository, EvaluationRepository
 from evalyx.evaluation.prompts import build_prompt
@@ -121,6 +122,7 @@ class _RunContext:
     """Values pinned at run-creation time, extracted before sessions close."""
 
     run_id: uuid.UUID
+    application_id: uuid.UUID
     dataset_version_id: uuid.UUID
     agent_model: str
     params: ExecutionParams
@@ -178,6 +180,8 @@ class EvaluationRunner:
         logger.info(
             "evaluation_run_started",
             run_id=str(run_id),
+            application_id=str(context.application_id),
+            dataset_version_id=str(context.dataset_version_id),
             model=context.agent_model,
             total_cases=len(cases),
             already_resulted=len(already_done),
@@ -194,16 +198,39 @@ class EvaluationRunner:
                 else:
                     errors += 1
         except asyncio.CancelledError:
+            duration_ms = int((time.monotonic() - started) * 1000)
             await self._best_effort_mark(run_id, RunStatus.CANCELLED)
-            logger.warning("evaluation_run_cancelled", run_id=str(run_id))
+            metrics.increment("evaluation_runs_total", {"status": "cancelled"})
+            metrics.observe(
+                "evaluation_run_duration_ms", duration_ms, {"status": "cancelled"}
+            )
+            logger.warning(
+                "evaluation_run_cancelled",
+                run_id=str(run_id),
+                duration_ms=duration_ms,
+            )
             raise
         except Exception as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
             await self._best_effort_mark(run_id, RunStatus.FAILED)
-            logger.error("evaluation_run_failed", run_id=str(run_id), error=str(exc))
+            metrics.increment("evaluation_runs_total", {"status": "failed"})
+            metrics.observe(
+                "evaluation_run_duration_ms", duration_ms, {"status": "failed"}
+            )
+            logger.error(
+                "evaluation_run_failed",
+                run_id=str(run_id),
+                duration_ms=duration_ms,
+                error=type(exc).__name__,
+            )
             raise RunnerError(f"Evaluation run {run_id} failed: {exc}") from exc
 
         duration_ms = int((time.monotonic() - started) * 1000)
         await self._transition(run_id, RunStatus.COMPLETED)
+        metrics.increment("evaluation_runs_total", {"status": "completed"})
+        metrics.observe(
+            "evaluation_run_duration_ms", duration_ms, {"status": "completed"}
+        )
         logger.info(
             "evaluation_run_completed",
             run_id=str(run_id),
@@ -317,6 +344,7 @@ class EvaluationRunner:
             # the session so detached attributes are safe afterwards.
             return _RunContext(
                 run_id=run.id,
+                application_id=run.application_id,
                 dataset_version_id=run.dataset_version_id,
                 agent_model=run.agent_model,
                 params=_execution_params(run.configuration_snapshot),

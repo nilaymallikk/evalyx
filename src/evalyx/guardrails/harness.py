@@ -13,6 +13,7 @@ import uuid
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evalyx.core.metrics import metrics
 from evalyx.db.models import (
     CaseStatus,
     EvaluationCaseResult,
@@ -130,9 +131,9 @@ class GuardrailHarness:
         self, guardrail: Guardrail, case_result: EvaluationCaseResult
     ) -> GuardrailVerdict:
         try:
-            return await guardrail.evaluate(case_result, context=self._context)
+            verdict = await guardrail.evaluate(case_result, context=self._context)
         except GuardrailExecutionError as exc:
-            return GuardrailVerdict(
+            verdict = GuardrailVerdict(
                 name=guardrail.name,
                 type=guardrail.type,
                 passed=False,
@@ -142,7 +143,7 @@ class GuardrailHarness:
                 execution_error=str(exc),
             )
         except Exception as exc:  # defensive: never let one guardrail kill the set  # noqa: BLE001
-            return GuardrailVerdict(
+            verdict = GuardrailVerdict(
                 name=guardrail.name,
                 type=guardrail.type,
                 passed=False,
@@ -151,6 +152,15 @@ class GuardrailHarness:
                 metadata={"execution_error": f"{type(exc).__name__}: {exc}"},
                 execution_error=f"{type(exc).__name__}: {exc}",
             )
+        # Aggregate guardrail outcome metric. Labels are bounded: guardrail
+        # names come from the configured harness (a small, controlled set)
+        # and status is the GuardrailStatus enum. Never PII values, prompt
+        # or output content.
+        metrics.increment(
+            "guardrail_evaluations_total",
+            {"name": guardrail.name, "status": _verdict_status(verdict).value},
+        )
+        return verdict
 
     async def _persist(self, case_result_id: uuid.UUID, verdict: GuardrailVerdict) -> None:
         async with self._session_factory() as session:

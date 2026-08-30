@@ -39,12 +39,15 @@ coexisting artifact. Persisted thresholds make every decision
 reproducible without relying on current configuration.
 """
 
+import time
 import uuid
 from collections import defaultdict
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evalyx.core.metrics import metrics
 from evalyx.db.models import (
     Dataset,
     DatasetVersion,
@@ -90,6 +93,9 @@ class RegressionValidationError(RegressionError):
     """The two runs cannot be meaningfully compared (clear, typed reason)."""
 
 
+logger = structlog.get_logger(__name__)
+
+
 class RegressionService:
     """Orchestrates regression comparisons over persisted evaluation data."""
 
@@ -113,6 +119,12 @@ class RegressionService:
         """
         thresholds = thresholds or RegressionThresholds()
         fingerprint = policy_fingerprint(thresholds)
+        started = time.monotonic()
+        logger.info(
+            "regression_comparison_started",
+            baseline_run_id=str(baseline_run_id),
+            current_run_id=str(current_run_id),
+        )
 
         async with self._session_factory() as session:
             input_data = await self._build_comparison_input(
@@ -129,6 +141,7 @@ class RegressionService:
             if existing is not None:
                 report.comparison_id = existing.id
                 report.created_at = existing.created_at
+                self._log_comparison_completed(report, started, reused=True)
                 return report
 
             comparison = await self._regressions.create(
@@ -144,7 +157,32 @@ class RegressionService:
             )
             report.comparison_id = comparison.id
             report.created_at = comparison.created_at
+            self._log_comparison_completed(report, started, reused=False)
             return report
+
+    def _log_comparison_completed(
+        self, report: RegressionReport, started: float, *, reused: bool
+    ) -> None:
+        """Structured comparison-completion event with safe fields only.
+
+        Safe fields: ids (log correlation, never metric labels), the bounded
+        ``result`` enum, the boolean flag, and monotonic duration. The full
+        report, thresholds snapshot, prompts, and outputs are never logged.
+        """
+        duration_ms = round((time.monotonic() - started) * 1000, 2)
+        logger.info(
+            "regression_comparison_completed",
+            comparison_id=str(report.comparison_id),
+            baseline_run_id=str(report.baseline_run_id),
+            current_run_id=str(report.current_run_id),
+            result=report.result.value,
+            regression_detected=report.regression_detected,
+            reused=reused,
+            duration_ms=duration_ms,
+        )
+        metrics.increment(
+            "regression_comparisons_total", {"result": report.result.value}
+        )
 
     async def get_report(self, comparison_id: uuid.UUID) -> RegressionReport:
         """Reload a persisted comparison as a typed report."""

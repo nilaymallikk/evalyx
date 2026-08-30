@@ -32,6 +32,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
+from evalyx.api.middleware import SCOPE_REQUEST_ID_KEY
+from evalyx.core.context import get_request_id
 from evalyx.db.repositories import DuplicateVersionError, NotFoundError
 from evalyx.evaluation.regression.service import RegressionValidationError
 
@@ -129,15 +131,23 @@ def register_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        # The correlation contextvar is already cleared when this outer
+        # handler runs (the observability middleware unwound first), so the
+        # resolved id is read from the per-request ASGI scope instead.
+        request_id = request.scope.get(SCOPE_REQUEST_ID_KEY) or get_request_id()
         logger.error(
             "unhandled_api_error",
+            request_id=request_id,
             method=request.method,
             path=request.url.path,
             error=type(exc).__name__,
             exc_info=True,  # noqa: LOG014 — traceback goes to logs, never to the response
         )
-        return _error_response(
+        response = _error_response(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "internal_error",
             "An unexpected internal error occurred.",
         )
+        if request_id is not None:
+            response.headers["X-Request-ID"] = request_id
+        return response

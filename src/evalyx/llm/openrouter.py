@@ -96,7 +96,9 @@ class OpenRouterProvider:
                 headers=self._auth_headers(),
             )
 
-        response, latency_ms = await send_with_retries(send, self._retry_policy)
+        response, latency_ms = await send_with_retries(
+            send, self._retry_policy, provider="openrouter", model=model
+        )
         return self._interpret(response, requested_model=model, latency_ms=latency_ms)
 
     def _interpret(

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+import structlog
 from pydantic import BaseModel, Field
 
 from evalyx.llm.errors import (
@@ -25,6 +26,8 @@ from evalyx.llm.errors import (
     LLMRateLimitError,
     LLMTimeoutError,
 )
+
+logger = structlog.get_logger(__name__)
 
 #: Explicit HTTP timeouts; an LLM call must never hang indefinitely.
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
@@ -97,6 +100,9 @@ def _retry_delay(
 async def send_with_retries(
     send: Callable[[], Awaitable[httpx.Response]],
     policy: RetryPolicy,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> tuple[httpx.Response, int]:
     """Execute ``send`` with bounded retries for transient failures.
 
@@ -106,6 +112,10 @@ async def send_with_retries(
     Raises :class:`LLMTimeoutError` or :class:`LLMConnectionError` when the
     final attempt fails at the network level. All other outcomes are
     returned to the caller for status-code mapping and parsing.
+
+    Each deferred retry emits a structured ``provider_retry_scheduled``
+    event with safe fields only (provider, model, attempt, error type,
+    bounded delay) — never the provider response body, prompt, or output.
     """
     last_latency_ms = 0
     for attempt in range(policy.max_retries + 1):
@@ -115,11 +125,13 @@ async def send_with_retries(
         except httpx.TimeoutException as exc:
             if attempt >= policy.max_retries:
                 raise LLMTimeoutError(f"LLM request timed out after retries: {exc}") from exc
+            _log_provider_retry(provider, model, attempt, policy, "timeout")
             await asyncio.sleep(_retry_delay(policy, attempt))
             continue
         except httpx.TransportError as exc:
             if attempt >= policy.max_retries:
                 raise LLMConnectionError(f"Could not reach LLM provider: {exc}") from exc
+            _log_provider_retry(provider, model, attempt, policy, type(exc).__name__)
             await asyncio.sleep(_retry_delay(policy, attempt))
             continue
 
@@ -134,6 +146,9 @@ async def send_with_retries(
                         retry_after = float(raw)
                     except ValueError:
                         retry_after = None
+            _log_provider_retry(
+                provider, model, attempt, policy, f"http_{response.status_code}", retry_after
+            )
             await asyncio.sleep(_retry_delay(policy, attempt, retry_after))
             continue
 
@@ -141,6 +156,26 @@ async def send_with_retries(
 
     # Unreachable: the loop either returns or raises.
     raise AssertionError("send_with_retries exhausted retries without outcome")
+
+
+def _log_provider_retry(
+    provider: str | None,
+    model: str | None,
+    attempt: int,
+    policy: RetryPolicy,
+    error_type: str,
+    retry_after_seconds: float | None = None,
+) -> None:
+    """Emit a safe structured retry event (attempt zero-based)."""
+    logger.warning(
+        "provider_retry_scheduled",
+        provider=provider,
+        model=model,
+        attempt=attempt + 1,
+        max_attempts=policy.max_retries + 1,
+        error_type=error_type,
+        retry_after_seconds=retry_after_seconds,
+    )
 
 
 __all__ = [

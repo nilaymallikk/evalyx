@@ -16,7 +16,7 @@ from typing import Literal
 
 from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "test", "production"]
@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # Application
     app_env: Environment = "development"
     log_level: LogLevel = "INFO"
+    # Observability: requests slower than this produce a structured
+    # http_request_slow warning (milliseconds). Purely log-level — no
+    # external monitoring dependency.
+    slow_request_threshold_ms: int = Field(default=1000, ge=1)
 
     # LLM provider selection (azure_openai is a future provider)
     llm_provider: Literal["openrouter", "ollama"] = "openrouter"

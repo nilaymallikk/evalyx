@@ -2,7 +2,7 @@
 
 An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents.
 
-## Status: Phase 9 complete — REST API & HTTP application layer (FastAPI)
+## Status: Phase 10 complete — observability & operational reliability
 
 ### Currently implemented
 
@@ -499,6 +499,112 @@ Security limitations (explicit, intentional for this phase):
 - Secrets are never accepted in request bodies; error responses never
   include stack traces, SQL, filesystem paths, or provider payloads;
   guardrail metadata contains categories/counts, never raw PII matches.
+
+### Observability (Phase 10)
+
+Evalyx is observable through **structured logs** and a **lightweight
+in-process metrics registry** — no external telemetry stack (no Prometheus,
+Grafana, OpenTelemetry, Sentry, Datadog, Azure SDKs) and no new runtime
+dependencies. Everything is cross-cutting infrastructure: domain logic
+contains no logging/formatting concerns beyond typed events.
+
+**Request correlation (request IDs).** Every HTTP response carries an
+`X-Request-ID` header. Send your own (letters/digits/`.`/`_`/`-`, max 128
+chars) and it is reused; send nothing and a UUID4 is generated; send
+something unsafe and it is replaced — the rejected value is never logged
+(only `reason` + `length`). Example:
+
+```
+Request:   POST /api/v1/evaluations
+Response:  X-Request-ID: test-observability-123   (client id reused)
+Logs:      http_request_completed request_id=test-observability-123
+```
+
+**Correlation strategy.** `request_id`, `run_id`, and `task_id` live in
+context variables (`structlog.contextvars`, never mutable globals) and are
+merged into *every* structured log event automatically. The chain for an
+evaluation is:
+
+```
+request_id (HTTP middleware)
+    → run_id   (persisted EvaluationRun; the API logs evaluation_submitted
+                with run_id + task_id)
+    → task_id  (reused from Celery's request context; the worker binds it
+                so all pipeline/runner/guardrail logs carry it)
+```
+
+IDs are **log correlation fields, never metric labels** — the metrics
+registry *rejects* label keys like `request_id`/`run_id`/`task_id` because
+identifiers would create unbounded label cardinality.
+
+**Structured logging.** Phase 2's setup is extended, not replaced:
+human-readable console output in development, JSON lines in production.
+Key events:
+
+```json
+{"event": "http_request_completed", "request_id": "...", "method": "POST",
+ "route": "/api/v1/evaluations", "status_code": 202, "duration_ms": 18}
+```
+
+```json
+{"event": "evaluation_run_completed", "run_id": "...", "task_id": "...",
+ "executed_cases": 2, "duration_ms": 842}
+```
+
+Other events: `http_request_started` (debug), `http_request_slow` (warning,
+when a request exceeds `SLOW_REQUEST_THRESHOLD_MS`, default 1000),
+`request_id_rejected`, `evaluation_submitted` (request→run→task link),
+`evaluation_run_started/completed/failed/cancelled` (with
+`application_id`, `dataset_version_id`, durations), `task_received/
+retrying/completed/failed`, `provider_retry_scheduled` (provider, model,
+attempt, error type — never response bodies), `regression_comparison_
+started/completed` (ids + bounded result + duration), and
+`readiness_check_failed` (dependency name only).
+
+**Safe logging.** Observability code explicitly selects safe fields.
+Never logged: request bodies, `Authorization`/cookies/headers, query
+strings, prompts, model outputs, raw PII, provider response bodies,
+connection strings, or secrets. 422 responses deliberately exclude
+offending input values; 500 responses are generic (tracebacks go to logs
+only); worker failure events log the exception *type*, never its message.
+
+**Metrics.** `src/evalyx/core/metrics.py` provides a thread-safe,
+async-safe, in-process registry (counters + timing observations) with a
+deterministic `snapshot()` for tests/debugging and a test-only `reset()`.
+Recorded metrics (all labels bounded):
+
+| Metric | Labels |
+|---|---|
+| `http_requests_total` | method, route template, status |
+| `http_request_duration_ms` | method, route template |
+| `evaluation_runs_total` | status (completed/failed/cancelled) |
+| `evaluation_run_duration_ms` | status |
+| `evaluation_cases_total` | status (executed/passed/failed/error) |
+| `evaluation_case_errors_total` | status (error) |
+| `guardrail_evaluations_total` | guardrail name (configured set), status |
+| `worker_tasks_total` | task name, outcome (success/failed/retry) |
+| `worker_task_failures_total` | task name |
+| `regression_comparisons_total` | result (bounded enum) |
+
+Route labels are **templates** (`/api/v1/evaluations/{run_id}`), never
+concrete paths; unmatched requests are bucketed as `/unmatched`. There is
+no public `/metrics` endpoint by design — a future Prometheus/OpenTelemetry
+phase can export the same registry without touching instrumented code.
+
+**Health observability.** `/health` and `/health/ready` behavior is
+unchanged; a failing readiness dependency additionally logs
+`readiness_check_failed {dependency}` (name only, no connection strings).
+
+**Development vs production.** Development stays human-readable console
+output; production emits JSON lines on stdout. Because everything is
+structured, correlation-aware, and secret-free, logs and metrics can later
+be shipped to **Azure Monitor / Application Insights** (or any other
+backend) with a log forwarder — no domain-code changes and no vendor SDKs
+required.
+
+**Configuration.** One new setting: `SLOW_REQUEST_THRESHOLD_MS` (default
+`1000`). Metrics are always enabled in-process (no setting needed); they
+cost only in-memory dict updates behind a lock.
 
 ### Database
 

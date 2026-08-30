@@ -75,7 +75,9 @@ class OllamaProvider:
                 json=payload,
             )
 
-        response, latency_ms = await send_with_retries(send, self._retry_policy)
+        response, latency_ms = await send_with_retries(
+            send, self._retry_policy, provider="ollama", model=model
+        )
 
         if response.status_code >= 400:
             raise _error_for_status(response)
