@@ -2,7 +2,7 @@
 
 An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents.
 
-## Status: Phase 10 complete — observability & operational reliability
+## Status: Phase 11 complete — MLGPT reference application integration & end-to-end demo
 
 ### Currently implemented
 
@@ -19,6 +19,8 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 - Background workers (`src/evalyx/worker/`) — Celery + Redis(transport) orchestration around the existing pipeline: `run_evaluation` task receives a `run_id`, executes the async pipeline through a controlled event-loop bridge, and keeps PostgreSQL authoritative for all evaluation state
 - Regression detection & baseline comparison (`src/evalyx/evaluation/regression/`) — deterministic, LLM-free comparison of two completed runs (baseline vs current): pass/failure/error rates, per-guardrail failure rates, latency, case-level transitions, and typed threshold policy producing persisted, idempotent `RegressionComparison` artifacts
 - REST API (`src/evalyx/api/`) — versioned FastAPI surface under `/api/v1` for applications, dataset/version management, test cases, asynchronous evaluation submission (Celery), run/case/guardrail inspection, and regression comparisons; centralized error mapping, pagination, typed request/response schemas, OpenAPI/Swagger UI
+- Application-under-test integration (`src/evalyx/application/`) — evaluate external AI applications (not just raw model providers) over HTTP: typed `ApplicationTarget` protocol, secret-safe `HttpApplicationTarget` transport, a target registry, and a worker execution branch selected by the run's `application:<name>` model selector; the LLMProvider path is unchanged
+- MLGPT reference demo (`examples/mlgpt_demo/`) — end-to-end demonstration driving MLGPT (the reference RAG chatbot) through the REST API: idempotent setup, baseline run, controlled reversible behavior change, second run, and a Phase 8 regression comparison
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
@@ -605,6 +607,60 @@ required.
 **Configuration.** One new setting: `SLOW_REQUEST_THRESHOLD_MS` (default
 `1000`). Metrics are always enabled in-process (no setting needed); they
 cost only in-memory dict updates behind a lock.
+
+## Evalyx × MLGPT reference demo
+
+MLGPT — a production RAG chatbot (FastAPI + Streamlit, Pinecone/Jina retrieval,
+Redis memory, OpenRouter generation) living in a **separate repository** — is
+Evalyx's official reference application-under-test. The demo (`examples/mlgpt_demo/`)
+shows the full reliability workflow a recruiter can follow in ~20 minutes.
+
+```
+┌─────────────────────────────┐         ┌──────────────────────────────────────┐
+│  MLGPT (system under test)  │         │  Evalyx (evaluation platform)        │
+│                             │         │                                      │
+│  Streamlit UI   :8501       │         │  REST API        :8000               │
+│  FastAPI RAG API:8001 ◄─────┼─────────┼── Celery worker (evaluation target)  │
+│   · retrieval + rerank      │  HTTP   │   · guardrails + scoring             │
+│   · Redis conversation memory│        │   · PostgreSQL (state of record)     │
+│   · OpenRouter (free model) │         │   · regression engine (LLM-free)     │
+└─────────────────────────────┘         └──────────────────────────────────────┘
+```
+
+**Separation of concerns.** MLGPT is the *system under test*: Evalyx never imports
+MLGPT code, never touches its database, and never pretends it is a model provider.
+Evalyx is the *platform*: it drives MLGPT's HTTP API (`POST /v1/chat`) through the
+typed `ApplicationTarget` adapter, judges the answers with its own LLM judges, and
+produces evidence. A run selects the demo target with `agent_model="application:mlgpt"`;
+a normal model run (`agent_model="<model>"`) uses the unchanged `LLMProvider` path.
+
+**The demo dataset** (8 cases, `examples/mlgpt_demo/dataset.py`) covers ordinary
+grounded questions, instruction-following constraints, prompt-injection attempts,
+fake-PII echo probes (`john.doe@example.test` — clearly fake), a safety-sensitive
+request, an out-of-domain hallucination trap, and a degenerate edge case.
+
+**The controlled regression** changes *MLGPT's behavior*, never Evalyx's results:
+the demo temporarily replaces MLGPT's `prompts/rag_prompt.txt` with a deliberately
+weakened variant (MLGPT reads that file from disk on every request). The original
+prompt is restored automatically (`try/finally` plus `--restore`); no MLGPT source
+code is modified.
+
+```bash
+# Prerequisites: PostgreSQL + Redis (docker compose up -d), Evalyx API (:8000),
+# Evalyx Celery worker, and MLGPT running (uv run uvicorn src.api.main:app --port 8001)
+
+uv run python examples/mlgpt_demo/run_demo.py             # full demo
+uv run python examples/mlgpt_demo/run_demo.py --resume    # reuse the completed baseline run
+                                                          # from the state file and only execute
+                                                          # the degraded evaluation (quota-friendly)
+uv run python examples/mlgpt_demo/run_demo.py --restore   # restore MLGPT prompt only
+```
+
+The script: registers the MLGPT application + two versions (idempotent), creates the
+dataset (idempotent, stable case names), submits the baseline run, polls to completion,
+applies the temporary prompt degradation, runs the second evaluation, restores the
+prompt, then compares the runs and prints a summary — case names, guardrail findings,
+and threshold violations only (never prompts, outputs, PII, or keys).
 
 ### Database
 

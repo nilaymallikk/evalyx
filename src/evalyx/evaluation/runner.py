@@ -43,11 +43,16 @@ import structlog
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from evalyx.application.base import (
+    ApplicationInvocationError,
+    ApplicationResponse,
+    ApplicationTarget,
+)
 from evalyx.core.metrics import metrics
 from evalyx.db.models import CaseStatus, RunStatus, TestCase
 from evalyx.db.repositories import DatasetRepository, EvaluationRepository
 from evalyx.evaluation.prompts import build_prompt
-from evalyx.llm.base import LLMProvider
+from evalyx.llm.base import LLMProvider, LLMResponse
 from evalyx.llm.errors import LLMProviderError
 
 logger = structlog.get_logger(__name__)
@@ -134,14 +139,28 @@ class EvaluationRunner:
     The runner manages its own short-lived sessions (one per operation) via
     the injected session factory, matching the repository pattern; sessions
     are never shared across concurrent work.
+
+    The evaluation *target* is either a raw model provider (``provider``)
+    or an external application under test (``application_target``, e.g.
+    MLGPT over HTTP) — exactly one must be given. The two paths share all
+    runner mechanics (cases, persistence, scoring hand-off) and differ only
+    in how one prompt is invoked.
     """
 
     def __init__(
         self,
-        provider: LLMProvider,
+        provider: LLMProvider | None,
         session_factory: async_sessionmaker[AsyncSession],
+        *,
+        application_target: ApplicationTarget | None = None,
     ) -> None:
+        if (provider is None) == (application_target is None):
+            raise RunnerError(
+                "Exactly one evaluation target is required: "
+                "a provider or an application target."
+            )
         self._provider = provider
+        self._application_target = application_target
         self._session_factory = session_factory
         self._datasets = DatasetRepository()
         self._evaluations = EvaluationRepository()
@@ -266,20 +285,40 @@ class EvaluationRunner:
         latency_ms: int | None = None
         error: str | None = None
         metrics: dict = {"model": context.agent_model}
+        response: ApplicationResponse | LLMResponse
 
         try:
-            response = await self._provider.complete(
-                prompt,
-                model=context.agent_model,
-                temperature=context.params.temperature,
-                max_tokens=context.params.max_tokens,
-                system=context.params.system,
-            )
-        except LLMProviderError as exc:
+            if self._application_target is not None:
+                # Application-under-test path: the application owns its own
+                # model configuration; execution params do not apply.
+                response = await self._application_target.invoke(prompt)
+            else:
+                assert self._provider is not None  # constructor invariant
+                response = await self._provider.complete(
+                    prompt,
+                    model=context.agent_model,
+                    temperature=context.params.temperature,
+                    max_tokens=context.params.max_tokens,
+                    system=context.params.system,
+                )
+            actual_output = response.content
+            latency_ms = response.latency_ms
+            if isinstance(response, ApplicationResponse):
+                metrics.update(response.metadata)
+            else:
+                if response.usage is not None:
+                    metrics["usage"] = response.usage.model_dump()
+                if response.model:
+                    metrics["model"] = response.model
+                if response.finish_reason:
+                    metrics["finish_reason"] = response.finish_reason
+        except (LLMProviderError, ApplicationInvocationError) as exc:
             status = CaseStatus.ERROR
             error = f"{type(exc).__name__}: {exc}"
             metrics["provider_error"] = type(exc).__name__
-            metrics["provider_error_retryable"] = exc.retryable
+            metrics["provider_error_retryable"] = (
+                exc.retryable if isinstance(exc, LLMProviderError) else False
+            )
             logger.warning(
                 "evaluation_case_errored",
                 run_id=str(context.run_id),
@@ -297,14 +336,6 @@ class EvaluationRunner:
                 provider_error="UnexpectedProviderError",
             )
         else:
-            actual_output = response.content
-            latency_ms = response.latency_ms
-            if response.usage is not None:
-                metrics["usage"] = response.usage.model_dump()
-            if response.model:
-                metrics["model"] = response.model
-            if response.finish_reason:
-                metrics["finish_reason"] = response.finish_reason
             logger.info(
                 "evaluation_case_completed",
                 run_id=str(context.run_id),

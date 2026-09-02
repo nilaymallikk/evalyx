@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
+    # Application-under-test targets (reference demo: MLGPT RAG chatbot on
+    # its documented default port). Server-side only — never sent to clients.
+    mlgpt_base_url: str = "http://127.0.0.1:8001"
+
     # Security
     evalyx_secret_key: SecretStr = SecretStr("")
 

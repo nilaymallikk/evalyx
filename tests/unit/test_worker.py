@@ -49,6 +49,8 @@ def make_summary(run_id: uuid.UUID, status: RunStatus = RunStatus.COMPLETED) -> 
 
 
 class FakeRun:
+    agent_model = "agent-model:free"
+
     def __init__(self, status: RunStatus) -> None:
         self.status = status
 
@@ -300,7 +302,7 @@ async def test_completed_run_is_rescored_not_reexecuted():
         Settings(),
         db_manager_factory=lambda s: FakeDBManager(FakeRun(RunStatus.COMPLETED)),
         provider_factory=lambda s: FakeProvider(),
-        pipeline_factory=lambda provider, sf: pipeline,
+        pipeline_factory=lambda provider, sf, target=None: pipeline,
     )
 
     assert pipeline.execute_calls == 0  # never blindly re-executed
@@ -318,7 +320,7 @@ async def test_valid_run_invokes_pipeline_exactly_once():
         Settings(),
         db_manager_factory=lambda s: FakeDBManager(FakeRun(RunStatus.PENDING)),
         provider_factory=lambda s: FakeProvider(),
-        pipeline_factory=lambda provider, sf: pipeline,
+        pipeline_factory=lambda provider, sf, target=None: pipeline,
     )
 
     assert pipeline.execute_calls == 1
@@ -332,7 +334,7 @@ async def test_task_result_is_json_serializable_and_small():
         Settings(),
         db_manager_factory=lambda s: FakeDBManager(FakeRun(RunStatus.PENDING)),
         provider_factory=lambda s: FakeProvider(),
-        pipeline_factory=lambda provider, sf: FakePipeline(),
+        pipeline_factory=lambda provider, sf, target=None: FakePipeline(),
     )
 
     encoded = json.dumps(result)
@@ -351,7 +353,7 @@ async def test_provider_is_closed_on_success():
         Settings(),
         db_manager_factory=lambda s: FakeDBManager(FakeRun(RunStatus.PENDING)),
         provider_factory=lambda s: provider,
-        pipeline_factory=lambda p, sf: FakePipeline(),
+        pipeline_factory=lambda p, sf, target=None: FakePipeline(),
     )
 
     assert provider.closed
@@ -367,7 +369,7 @@ async def test_provider_is_closed_on_pipeline_failure():
             Settings(),
             db_manager_factory=lambda s: FakeDBManager(FakeRun(RunStatus.RUNNING)),
             provider_factory=lambda s: provider,
-            pipeline_factory=lambda p, sf: pipeline,
+            pipeline_factory=lambda p, sf, target=None: pipeline,
         )
 
     assert provider.closed
@@ -396,7 +398,7 @@ async def test_database_is_disposed_on_success_and_failure():
         Settings(),
         db_manager_factory=lambda s: db,
         provider_factory=lambda s: FakeProvider(),
-        pipeline_factory=lambda p, sf: FakePipeline(),
+        pipeline_factory=lambda p, sf, target=None: FakePipeline(),
     )
     assert db.disposed
 
@@ -407,7 +409,7 @@ async def test_database_is_disposed_on_success_and_failure():
             Settings(),
             db_manager_factory=lambda s: db2,
             provider_factory=lambda s: FakeProvider(),
-            pipeline_factory=lambda p, sf: FakePipeline(error=RuntimeError("x")),
+            pipeline_factory=lambda p, sf, target=None: FakePipeline(error=RuntimeError("x")),
         )
     assert db2.disposed
 
@@ -434,7 +436,7 @@ async def test_runner_error_with_now_completed_run_rescores_instead():
         Settings(),
         db_manager_factory=lambda s: StatusFlippingDB(FakeRun(RunStatus.PENDING)),
         provider_factory=lambda s: FakeProvider(),
-        pipeline_factory=lambda p, sf: pipeline,
+        pipeline_factory=lambda p, sf, target=None: pipeline,
     )
 
     assert result["action"] == "rescored"

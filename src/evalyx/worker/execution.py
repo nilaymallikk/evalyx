@@ -46,6 +46,11 @@ import structlog
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from evalyx.application.base import (
+    ApplicationTarget,
+    application_name_from_model,
+    create_application_target,
+)
 from evalyx.core.config import Settings
 from evalyx.db.models import RunStatus
 from evalyx.db.repositories import EvaluationRepository
@@ -103,9 +108,15 @@ def decide_action(status: RunStatus) -> str:
 
 
 def _default_pipeline(
-    provider: LLMProvider, session_factory: async_sessionmaker
+    provider: LLMProvider,
+    session_factory: async_sessionmaker,
+    application_target: ApplicationTarget | None = None,
 ) -> EvaluationPipeline:
-    return EvaluationPipeline(provider=provider, session_factory=session_factory)
+    return EvaluationPipeline(
+        provider=provider,
+        session_factory=session_factory,
+        application_target=application_target,
+    )
 
 
 def _summary_result(summary: EvaluationSummary, *, action: str) -> dict:
@@ -143,19 +154,34 @@ async def _load_run_status(db: DatabaseManager, run_id: uuid.UUID) -> RunStatus 
     return run.status if run is not None else None
 
 
+async def _load_run_agent_model(db: DatabaseManager, run_id: uuid.UUID) -> str | None:
+    """Load the run's target selector (model name or ``application:<name>``)."""
+    async with db.session() as session:
+        run = await EvaluationRepository().get_run(session, run_id)
+    return run.agent_model if run is not None else None
+
+
 async def execute_evaluation(
     run_id: uuid.UUID,
     settings: Settings,
     *,
     db_manager_factory: Callable[[Settings], DatabaseManager] | None = None,
     provider_factory: Callable[[Settings], LLMProvider] | None = None,
-    pipeline_factory: Callable[[LLMProvider, async_sessionmaker], EvaluationPipeline]
+    pipeline_factory: Callable[
+        [LLMProvider, async_sessionmaker, ApplicationTarget | None],
+        EvaluationPipeline,
+    ]
     | None = None,
 ) -> dict:
     """Execute one evaluation run end-to-end and return a small result dict.
 
     The factories are injectable (call-time defaults) so tests can substitute
     fakes without a live database or provider.
+
+    The run's ``agent_model`` selects the evaluation target: an ordinary
+    model string uses the configured LLM provider; an
+    ``application:<name>`` selector evaluates a registered application
+    under test (e.g. MLGPT) through the application-target adapter.
     """
     db_manager_factory = db_manager_factory or DatabaseManager
     provider_factory = provider_factory or create_provider
@@ -163,6 +189,7 @@ async def execute_evaluation(
 
     db = db_manager_factory(settings)
     provider: LLMProvider | None = None
+    application_target: ApplicationTarget | None = None
     try:
         status = await _load_run_status(db, run_id)
         if status is None:
@@ -174,8 +201,19 @@ async def execute_evaluation(
             )
             return _skipped_result(run_id, status)
 
+        agent_model = await _load_run_agent_model(db, run_id) or ""
+        # The judge provider is always an Evalyx-side LLM provider (semantic
+        # guardrails judge outputs themselves). The run's ``agent_model``
+        # selector decides only the *execution* target: a raw model via the
+        # provider, or an external application under test.
         provider = provider_factory(settings)
-        pipeline = pipeline_factory(provider, db.session_factory)
+        application_name = application_name_from_model(agent_model)
+        application_target = (
+            create_application_target(application_name, settings)
+            if application_name is not None
+            else None
+        )
+        pipeline = pipeline_factory(provider, db.session_factory, application_target)
 
         if action == "rescore":
             summary = await pipeline.score_existing_run(run_id)
@@ -208,11 +246,15 @@ async def execute_evaluation(
         )
         return _summary_result(summary, action="executed")
     finally:
-        # The worker owns the provider and the database engine it created:
-        # both are closed even when the evaluation fails or is interrupted.
+        # The worker owns the provider/target and the database engine it
+        # created: both are closed even when the evaluation fails or is
+        # interrupted.
         if provider is not None:
             with suppress(Exception):
                 await provider.close()
+        if application_target is not None:
+            with suppress(Exception):
+                await application_target.close()
         with suppress(Exception):
             await db.dispose()
 

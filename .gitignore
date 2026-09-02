@@ -25,3 +25,7 @@ htmlcov/
 
 # AI tooling session artifacts
 .claude-flow/
+.mimosa/
+# MLGPT demo runtime state (created by examples/mlgpt_demo/run_demo.py)
+examples/mlgpt_demo/.demo_state.json
+examples/mlgpt_demo/__pycache__/

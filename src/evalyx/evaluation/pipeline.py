@@ -14,6 +14,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from evalyx.application.base import ApplicationTarget
 from evalyx.core.metrics import metrics
 from evalyx.db.models import CaseStatus, GuardrailStatus
 from evalyx.db.repositories import EvaluationRepository
@@ -26,7 +27,14 @@ from evalyx.llm.base import LLMProvider
 
 
 class EvaluationPipeline:
-    """Runs an evaluation end-to-end (execution + guardrails + scoring)."""
+    """Runs an evaluation end-to-end (execution + guardrails + scoring).
+
+    ``provider`` is the **judge** provider — always an Evalyx-side LLM
+    provider, used by semantic guardrails regardless of what is being
+    evaluated. ``application_target`` optionally replaces the *execution*
+    target: when given, cases are invoked against the external application
+    (e.g. MLGPT) instead of the raw provider.
+    """
 
     def __init__(
         self,
@@ -34,11 +42,18 @@ class EvaluationPipeline:
         provider: LLMProvider,
         session_factory: async_sessionmaker,
         policy: GuardrailPolicy | None = None,
+        application_target: ApplicationTarget | None = None,
     ) -> None:
         self._provider = provider
         self._session_factory = session_factory
         self._policy = policy or default_guardrail_policy()
-        self._runner = EvaluationRunner(provider, session_factory)
+        self._runner = EvaluationRunner(
+            # The runner's execution target: the application when set,
+            # otherwise the provider itself.
+            None if application_target is not None else provider,
+            session_factory,
+            application_target=application_target,
+        )
         self._evaluations = EvaluationRepository()
 
     async def run_and_score(
