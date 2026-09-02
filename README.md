@@ -2,7 +2,51 @@
 
 An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents.
 
-## Status: Phase 12 complete — reliability & failure analysis
+```text
+     Did our AI application get better or worse after this change — and why?
+                                  ▲
+        ┌─────────────────────────┴──────────────────────────┐
+        │                      Evalyx                        │
+        │  versioned datasets → async runs → guardrails →    │
+        │  scoring → regression comparison → failure analysis│
+        └─────────────────────────┬──────────────────────────┘
+                                  │ evaluates (HTTP, no imports)
+                    ┌─────────────┴─────────────┐
+                    │   MLGPT (system under     │
+                    │   test, separate repo)    │
+                    └───────────────────────────┘
+```
+
+**What it is.** Evalyx is a platform an AI engineering team would run before
+and after every change to an LLM application. You register the application,
+version an evaluation dataset, and submit runs; a Celery worker executes the
+cases, deterministic + LLM-judge guardrails grade the answers, and a
+regression engine compares any two runs to answer: *did this change make the
+application worse, and which cases/guardrails regressed?* When a case
+produces no answer at all, a failure-analysis layer classifies *why*
+(provider outage, rate limit, timeout, quota, malformed response…).
+
+**What MLGPT is.** MLGPT — a production RAG chatbot in a **separate
+repository** — is Evalyx's reference application-under-test: real proof that
+Evalyx evaluates an *existing external AI application* over HTTP rather than
+being a feature inside it. The [reference demo](#evalyx--mlgpt-reference-demo)
+runs the full workflow in ~20 minutes.
+
+**The core story, with real numbers from the recorded demo:**
+
+```text
+Baseline (MLGPT, grounded RAG prompt)      8 cases: 7 passed, 0 failed, 1 error
+      ↓  change the application (weakened RAG prompt)
+Current  (MLGPT, degraded)                 8 cases: 1 passed, 1 failed, 6 errors
+      ↓  compare with the regression engine (LLM-free, deterministic)
+REGRESSION DETECTED
+  pass rate 100% → 50% · error rate 12.5% → 75%
+  hallucination guardrail failures 0% → 50%
+  newly failed: normal-definition-supervised-learning
+                [hallucination, instruction_following]
+```
+
+## Status: Phase 13 complete — documentation & recruiter demo (Phases 1–12 built)
 
 ### Currently implemented
 
@@ -28,9 +72,89 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 
 ### Planned / future
 
-- Observability
+- Deeper failure debugging views
+- Broader observability (tracing, external metrics sinks)
 
 See `project_context.md` for the full product context and phased implementation plan.
+
+## Quick start (recruiter tour, ~5 minutes)
+
+Clone, and in two terminals:
+
+```bash
+# 1. Infrastructure + environment
+docker compose up -d                                  # PostgreSQL (:5433) + Redis (:6379)
+uv sync                                               # install dependencies
+cp .env.example .env                                  # then fill in OPENROUTER_API_KEY
+                                                      # and EVALYX_SECRET_KEY
+# 2. API (terminal 1)
+uv run python main.py                                 # http://127.0.0.1:8000  (Swagger: /docs)
+
+# 3. Worker (terminal 2)
+uv run celery -A evalyx.worker.celery_app worker --loglevel=INFO
+
+# 4. Sanity checks
+uv run pytest                                         # hermetic suite: no network needed
+curl http://127.0.0.1:8000/health/ready               # {"status":"ok",...}
+```
+
+Then pick a path:
+
+- **See the full story** (baseline → controlled regression → REGRESSION
+  DETECTED, against the real MLGPT application): follow
+  [Evalyx × MLGPT reference demo](#evalyx--mlgpt-reference-demo) (~20 min).
+- **Drive the API yourself**: `examples/submit_background_evaluation.py`
+  seeds a tiny dataset and submits a background evaluation; or browse the
+  Swagger UI and the [endpoint table](#rest-api-phase-9).
+- **Understand the design**: read [Architecture](#architecture) below, then
+  the phase sections (each phase documents its own guarantees).
+
+## Architecture
+
+```text
+                       ┌───────────────────────────────────────────────┐
+   AI application      │                   Evalyx                      │
+   (e.g. MLGPT)        │                                               │
+        │              │  REST API (FastAPI) ── request_id │           │
+        └───HTTP──────►│        │ submit → 202                         │
+   ApplicationTarget   │        ▼                                      │
+   (external app over  │  Redis ⇄ Celery worker                        │
+    HTTP; Evalyx never │        │ run_evaluation                       │
+    imports app code)  │        ▼                                      │
+                       │  EvaluationPipeline                           │
+                       │   ├─ EvaluationRunner ── executes each case   │
+                       │   │    against the LLMProvider *or* the       │
+                       │   │    ApplicationTarget (one per run)        │
+                       │   ├─ Guardrails ─ deterministic (PII,         │
+                       │   │    injection) + LLM-judge (safety,        │
+                       │   │    hallucination, instruction-following)  │
+                       │   ├─ Scoring ─ executed → passed/failed       │
+                       │   └─ Failure analysis ─ execution failures    │
+                       │        → typed category (deterministic)       │
+                       │        ▼                                      │
+                       │  PostgreSQL (state of record)                 │
+                       │        ▼                                      │
+                       │  Regression engine (pure, LLM-free):          │
+                       │  baseline vs current → typed report,          │
+                       │  thresholds, case-level findings              │
+                       └───────────────────────────────────────────────┘
+```
+
+Design rules the codebase actually enforces:
+
+- **One target per run.** A run's `agent_model` is either a model name
+  (executed through the provider abstraction) or `application:<name>`
+  (executed through the application-target adapter). Both paths share the
+  same runner, guardrails, scoring, and persistence.
+- **Provider independence.** Domain logic depends on the `LLMProvider`
+  protocol, never on OpenRouter specifics; free models are the policy,
+  and there is no paid-model path.
+- **Quality ≠ execution failure.** A guardrail failure means the
+  application *answered and the answer was bad*; an `error` case means it
+  *could not answer*. Phase 12 classifies the latter deterministically;
+  the regression engine never converts an outage into a quality drop.
+- **PostgreSQL is the state of record.** Celery/Redis carry operational
+  task state only; the API reads authoritative state from PostgreSQL.
 
 ## Local development
 
@@ -409,6 +533,7 @@ Endpoint inventory:
 | GET | `/api/v1/evaluations/{run_id}` | run status, metadata, case counts |
 | GET | `/api/v1/evaluations/{run_id}/results` | paginated case results + guardrails |
 | GET | `/api/v1/evaluations/{run_id}/guardrails` | flat paginated guardrail results |
+| GET | `/api/v1/evaluations/{run_id}/reliability` | execution-failure breakdown by category (Phase 12) |
 | GET | `/api/v1/evaluations/{run_id}/regressions` | comparisons involving the run |
 | POST | `/api/v1/regressions` | compare two completed runs (see Phase 8) |
 | GET | `/api/v1/regressions/{comparison_id}` | retrieve a persisted report |
@@ -661,6 +786,80 @@ dataset (idempotent, stable case names), submits the baseline run, polls to comp
 applies the temporary prompt degradation, runs the second evaluation, restores the
 prompt, then compares the runs and prints a summary — case names, guardrail findings,
 and threshold violations only (never prompts, outputs, PII, or keys).
+
+### What happens when MLGPT gets worse — the recorded run
+
+This is not a mock: on 2026-09-02 the demo executed live against the real
+MLGPT and its real (free-model) OpenRouter backend. The prompt degradation
+is MLGPT's own configuration change; every number below comes from Evalyx's
+PostgreSQL and its public API.
+
+```text
+========================================
+Evalyx × MLGPT Evaluation Demo
+========================================
+MLGPT:       healthy (redis: connected)
+Evalyx API:  {'status': 'ok', ...}
+
+Application: MLGPT
+Dataset:     mlgpt-support-v1 v4 (8 cases)
+
+Baseline evaluation (grounded MLGPT)
+    submitted → run 7cd30737…  (202 Accepted; Celery task)
+Baseline: run 7cd30737  status=completed  cases: total=8 passed=7 failed=0 error=1
+
+Applying controlled regression
+[regression] degraded RAG prompt applied (backup kept)
+
+Current evaluation (degraded MLGPT behavior)
+Current:  run d935ffc6  status=completed  cases: total=8 passed=1 failed=1 error=6
+[restore] original RAG prompt restored
+
+Regression comparison
+Result:           regression_detected
+Pass rate:        100.0% → 50.0% (Δ -50.0 pp)
+Error rate:       12.5% → 75.0% (Δ +62.5 pp)
+Threshold violations:
+  - pass_rate: dropped 50.0 pp (threshold 2.0)
+  - error_rate: rose 62.5 pp (threshold 2.0)
+  - guardrail 'hallucination' failure rate rose 50.0 pp
+  - guardrail 'instruction_following' failure rate rose 21.4 pp
+
+Newly failed cases (1):
+  - normal-definition-supervised-learning  [hallucination, instruction_following]
+========================================
+```
+
+How to read it — the three failure shapes a team actually sees:
+
+- **A quality regression** (the interesting one): the degraded system prompt
+  produced confidently wrong answers, so the hallucination and
+  instruction-following judges failed the previously-passing control case.
+  That is the application getting worse — exactly what Evalyx exists to catch.
+- **An honest error count**: the same day, OpenRouter's Nvidia free-model
+  upstream was intermittently returning 502s and the account's daily
+  free-tier quota ran out, so several cases *errored* rather than answered.
+  Evalyx reports what happened and fabricates nothing — those are execution
+  failures, not quality failures, and Phase 12's classifier labels them
+  (`provider_unavailable` / `quota_exhausted`) so they can never masquerade
+  as hallucinations. The error-rate delta was amplified by this outage; the
+  demo output says so rather than claiming all six errors were application bugs.
+- **Evidence everywhere**: every case's input/output snapshot, guardrail
+  verdicts with reasons, per-case latency, the typed failure record, and the
+  persisted regression report are retrievable through the documented API —
+  no database access needed:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/evaluations/<run_id>/results     # per-case evidence
+curl http://127.0.0.1:8000/api/v1/evaluations/<run_id>/reliability # failure breakdown
+curl http://127.0.0.1:8000/api/v1/regressions/<comparison_id>      # the verdict
+```
+
+The free-tier quota (≈50 requests/day) is the demo's real constraint: one
+full run consumes roughly a day's quota. `--resume` re-runs only the degraded
+evaluation against the stored baseline when you want to repeat the demo
+cheaply, and the demo's pre-flight gate refuses to start (protecting the
+quota) when MLGPT's upstream is down.
 
 ## Reliability & failure analysis (Phase 12)
 
