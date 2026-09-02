@@ -347,10 +347,21 @@ class RegressionService:
                     name=name,
                     status=case_result.status,
                     latency_ms=case_result.latency_ms,
+                    failure_category=_failure_category_of(case_result),
                     guardrails=guardrails_by_case.get(case_result.id, []),
                 )
             )
         return snapshots, identities
+
+
+def _failure_category_of(case_result) -> str | None:
+    """Classified failure category for one case result, if any (Phase 12)."""
+    metrics = case_result.metrics
+    if isinstance(metrics, dict):
+        failure = metrics.get("failure")
+        if isinstance(failure, dict) and isinstance(failure.get("category"), str):
+            return failure["category"]
+    return None
 
 
 def _summary_payload(report: RegressionReport) -> dict:

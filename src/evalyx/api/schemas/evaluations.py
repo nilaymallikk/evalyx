@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from evalyx.api.schemas.applications import clean_configuration
 from evalyx.db.models import CaseStatus, RunStatus
@@ -114,6 +114,27 @@ class EvaluationRunSummary(BaseModel):
     counts: CaseStatusCounts | None = None
 
 
+class RunReliabilityReport(BaseModel):
+    """Execution-reliability summary for one run (Phase 12).
+
+    A deterministic breakdown of *execution* failures — cases that produced
+    no usable answer — by classified category. Quality failures (the
+    application answered but the answer was bad) are not part of this
+    report; they live in guardrail/scoring results.
+    """
+
+    total_cases: int
+    errored_cases: int
+    #: Errored cases with a classified failure record (Phase 12+ rows).
+    classified_failures: int
+    #: Errored cases without classification (pre-Phase 12 rows).
+    unclassified_execution_failures: int
+    #: Classified failures whose category is safe to retry.
+    retryable_failures: int
+    #: category → count, most frequent first (name as tiebreaker).
+    failure_breakdown: dict[str, int]
+
+
 class GuardrailResultResponse(BaseModel):
     """A single guardrail check outcome (safe fields only).
 
@@ -135,6 +156,45 @@ class GuardrailResultResponse(BaseModel):
     created_at: datetime
 
 
+class ExecutionFailureInfo(BaseModel):
+    """Structured execution-failure information for one errored case.
+
+    Extracted from the case result's persisted ``metrics["failure"]``
+    (Phase 12 deterministic classification). ``None`` fields mean the
+    evidence did not determine them; rows persisted before Phase 12 have
+    no failure data at all (``failure`` stays ``null``).
+
+    Quality failures are deliberately absent here: a guardrail failure
+    means the application *answered* — that lives in ``guardrail_results``.
+    """
+
+    category: str
+    reason: str
+    retryable: bool
+    http_status: int | None = None
+    attempts: int | None = None
+
+
+def failure_from_metrics(metrics: dict | None) -> ExecutionFailureInfo | None:
+    """Pull the typed failure record out of persisted case metrics.
+
+    Malformed content cannot originate from the classifier (it writes only
+    bounded safe fields), but the boundary stays defensive: anything that
+    does not validate is reported as ``unknown`` rather than leaked.
+    """
+    if not isinstance(metrics, dict):
+        return None
+    raw = metrics.get("failure")
+    if not isinstance(raw, dict) or not isinstance(raw.get("category"), str):
+        return None
+    try:
+        return ExecutionFailureInfo.model_validate(raw)
+    except ValidationError:
+        return ExecutionFailureInfo(
+            category="unknown", reason="unparsable failure record", retryable=False
+        )
+
+
 class EvaluationCaseResultResponse(BaseModel):
     """One test-case execution result, with its guardrail outcomes."""
 
@@ -149,5 +209,8 @@ class EvaluationCaseResultResponse(BaseModel):
     latency_ms: int | None
     error: str | None
     metrics: dict | None
+    #: Structured execution-failure info; ``null`` for passed/failed cases
+    #: and for errored rows persisted before Phase 12.
+    failure: ExecutionFailureInfo | None = None
     guardrail_results: list[GuardrailResultResponse]
     created_at: datetime

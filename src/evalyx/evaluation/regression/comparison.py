@@ -381,6 +381,7 @@ def _finding(pair: MatchedCasePair) -> CaseFinding:
         current_guardrail_failures=current_failures,
         new_guardrail_failures=sorted(set(current_failures) - set(baseline_failures)),
         fixed_guardrail_failures=sorted(set(baseline_failures) - set(current_failures)),
+        current_failure_category=pair.current.failure_category,
     )
 
 

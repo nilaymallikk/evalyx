@@ -2,7 +2,7 @@
 
 An AI evaluation and reliability platform for testing, observing, debugging, and regression-testing LLM applications and agents.
 
-## Status: Phase 11 complete — MLGPT reference application integration & end-to-end demo
+## Status: Phase 12 complete — reliability & failure analysis
 
 ### Currently implemented
 
@@ -21,13 +21,13 @@ An AI evaluation and reliability platform for testing, observing, debugging, and
 - REST API (`src/evalyx/api/`) — versioned FastAPI surface under `/api/v1` for applications, dataset/version management, test cases, asynchronous evaluation submission (Celery), run/case/guardrail inspection, and regression comparisons; centralized error mapping, pagination, typed request/response schemas, OpenAPI/Swagger UI
 - Application-under-test integration (`src/evalyx/application/`) — evaluate external AI applications (not just raw model providers) over HTTP: typed `ApplicationTarget` protocol, secret-safe `HttpApplicationTarget` transport, a target registry, and a worker execution branch selected by the run's `application:<name>` model selector; the LLMProvider path is unchanged
 - MLGPT reference demo (`examples/mlgpt_demo/`) — end-to-end demonstration driving MLGPT (the reference RAG chatbot) through the REST API: idempotent setup, baseline run, controlled reversible behavior change, second run, and a Phase 8 regression comparison
+- Failure analysis (`src/evalyx/evaluation/failures.py`) — Phase 12 reliability layer: deterministic classification of *execution* failures (the application could not answer) into a small typed taxonomy, persisted on the case result and exposed through the API. Quality failures (the application answered, but the answer was bad) remain the domain of guardrails/scoring and are never conflated with infrastructure errors
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
 
 ### Planned / future
 
-- Failure debugging
 - Observability
 
 See `project_context.md` for the full product context and phased implementation plan.
@@ -661,6 +661,75 @@ dataset (idempotent, stable case names), submits the baseline run, polls to comp
 applies the temporary prompt degradation, runs the second evaluation, restores the
 prompt, then compares the runs and prints a summary — case names, guardrail findings,
 and threshold violations only (never prompts, outputs, PII, or keys).
+
+## Reliability & failure analysis (Phase 12)
+
+The Phase 11 demo hit real OpenRouter instability (upstream 502s, then daily
+free-tier quota exhaustion). That exposed a gap: Evalyx could say a case was
+`error`, but not *why*. Phase 12 answers three questions:
+
+1. **Did the application produce a bad answer?** — a *quality failure*
+   (guardrails failed it). Unchanged; lives in guardrail/scoring results.
+2. **Did the application fail to produce an answer?** — an *execution
+   failure* (case status `error`).
+3. **For execution failures: why?** — deterministic classification into a
+   small typed taxonomy.
+
+### Failure taxonomy
+
+`src/evalyx/evaluation/failures.py` classifies from **exception types and
+HTTP status codes only** — never an LLM, never response-body sniffing.
+Ambiguous evidence becomes `unknown` (no invented root causes):
+
+| Category | Meaning | Retryable |
+|---|---|---|
+| `provider_unavailable` | Provider 5xx (502/503/504...) | yes |
+| `rate_limited` | HTTP 429, quota not exhausted | yes |
+| `quota_exhausted` | Daily free-model quota gone (429) | **no** |
+| `timeout` | No response within the timeout | yes |
+| `connection_error` | Could not reach the application/provider | yes |
+| `malformed_response` | Provider answered, payload unusable | no |
+| `application_http_error` | Application under test returned 5xx | no* |
+| `application_response_invalid` | Application rejected the request (4xx) | no |
+| `authentication` | Credentials rejected | no |
+| `unknown` | Insufficient evidence | no |
+
+\* application-boundary 5xx is not retried by the evaluation layer because the
+HTTP transport already exhausted its own bounded retries before surfacing the
+error (`attempts` records how many). For MLGPT, Evalyx records only what is
+observable at the application boundary — an MLGPT 500 caused by *its* upstream
+provider is still `application_http_error`; Evalyx never invents internal
+MLGPT knowledge.
+
+### Where failure information appears
+
+- **Persistence** — each errored case's `metrics["failure"]` holds
+  `{category, reason, retryable, http_status, attempts}` (JSONB; **zero
+  migrations**). Reasons are classifier-authored templates, never exception
+  bodies — nothing secret or prompt-like can leak.
+- **API** — `GET /api/v1/evaluations/{run_id}/results` now includes an
+  optional, backwards-compatible `failure` object per case (`null` for
+  passed/failed cases and pre-Phase 12 rows).
+- **Reliability summary** — `GET /api/v1/evaluations/{run_id}/reliability`
+  returns the run's execution-failure breakdown by category:
+  `{"total_cases": 8, "errored_cases": 6, "classified_failures": 5,
+  "unclassified_execution_failures": 1, "retryable_failures": 4,
+  "failure_breakdown": {"provider_unavailable": 4, "rate_limited": 1}}`.
+- **Regression reports** — `newly_errored_cases` findings carry
+  `current_failure_category`, so an error-rate spike is immediately
+  triageable (a `provider_unavailable` spike is an outage, not an app bug).
+  Regression *metrics and thresholds are unchanged* — an outage can never
+  become a hallucination or instruction-following failure.
+
+### Retry behavior
+
+Application-target invocations retry only clearly transient failures
+(connection errors, timeouts, 502/503/504) with bounded exponential backoff
+(3 attempts, 1s/4s) — the same conservative philosophy as the Phase 4
+provider layer, compatible with Phase 7's sequential, rate-limit-conscious
+execution. A retried case still produces exactly **one** case result (the
+final outcome plus failure metadata). 4xx, malformed responses, and quota
+exhaustion are never retried.
 
 ### Database
 

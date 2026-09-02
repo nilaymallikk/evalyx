@@ -51,6 +51,11 @@ from evalyx.application.base import (
 from evalyx.core.metrics import metrics
 from evalyx.db.models import CaseStatus, RunStatus, TestCase
 from evalyx.db.repositories import DatasetRepository, EvaluationRepository
+from evalyx.evaluation.failures import (
+    ExecutionFailure,
+    FailureCategory,
+    classify_failure,
+)
 from evalyx.evaluation.prompts import build_prompt
 from evalyx.llm.base import LLMProvider, LLMResponse
 from evalyx.llm.errors import LLMProviderError
@@ -319,21 +324,31 @@ class EvaluationRunner:
             metrics["provider_error_retryable"] = (
                 exc.retryable if isinstance(exc, LLMProviderError) else False
             )
+            metrics["failure"] = classify_failure(
+                exc, attempts=getattr(exc, "attempts", None)
+            ).model_dump(mode="json")
             logger.warning(
                 "evaluation_case_errored",
                 run_id=str(context.run_id),
                 test_case_id=str(test_case.id),
                 provider_error=type(exc).__name__,
+                failure_category=metrics["failure"]["category"],
             )
         except Exception as exc:  # provider contract violation must not kill the run
             status = CaseStatus.ERROR
             error = f"UnexpectedProviderError: {exc}"
             metrics["provider_error"] = "UnexpectedProviderError"
+            metrics["failure"] = ExecutionFailure(
+                category=FailureCategory.UNKNOWN,
+                reason=type(exc).__name__,
+                retryable=False,
+            ).model_dump(mode="json")
             logger.warning(
                 "evaluation_case_errored",
                 run_id=str(context.run_id),
                 test_case_id=str(test_case.id),
                 provider_error="UnexpectedProviderError",
+                failure_category=FailureCategory.UNKNOWN.value,
             )
         else:
             logger.info(

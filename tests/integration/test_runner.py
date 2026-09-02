@@ -359,6 +359,8 @@ async def test_partial_failure_continues_and_completes(clean_db):
     assert "LLMTimeoutError" in errored.error
     assert errored.metrics["provider_error"] == "LLMTimeoutError"
     assert errored.metrics["provider_error_retryable"] is True
+    assert errored.metrics["failure"]["category"] == "timeout"
+    assert errored.metrics["failure"]["retryable"] is True
     assert errored.actual_output is None
     assert sum(1 for r in results if r.status is CaseStatus.EXECUTED) == 2
     assert all(r.input is not None for r in results)  # snapshots persisted

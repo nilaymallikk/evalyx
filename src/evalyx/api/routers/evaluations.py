@@ -25,6 +25,8 @@ from evalyx.api.schemas.evaluations import (
     EvaluationRunSummary,
     EvaluationSubmissionResponse,
     GuardrailResultResponse,
+    RunReliabilityReport,
+    failure_from_metrics,
 )
 from evalyx.api.services import EvaluationService
 from evalyx.db.models import CaseStatus, EvaluationCaseResult, EvaluationRun, RunStatus
@@ -112,6 +114,7 @@ def _to_case_result(
         latency_ms=case.latency_ms,
         error=case.error,
         metrics=case.metrics,
+        failure=failure_from_metrics(case.metrics),
         guardrail_results=guardrails,
         created_at=case.created_at,
     )
@@ -300,3 +303,46 @@ async def get_evaluation_status(
 ) -> RunStatus:
     run = await _get_run_or_404(session, run_id)
     return run.status
+
+
+@router.get(
+    "/{run_id}/reliability",
+    response_model=RunReliabilityReport,
+    summary="Summarize execution reliability for one run",
+    description=(
+        "Deterministic breakdown of the run's execution failures by "
+        "category (Phase 12 failure analysis). Answers 'did the application "
+        "fail to answer, and why' — quality failures live in the case "
+        "results and guardrail endpoints. Categories come from the "
+        "classifier at execution time; rows persisted before Phase 12 count "
+        "under `unknown` only when classified data exists."
+    ),
+    responses={404: {"description": "Run not found."}},
+)
+async def get_run_reliability(
+    run_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RunReliabilityReport:
+    await _get_run_or_404(session, run_id)
+    cases = await _repository().list_case_results(session, run_id)
+
+    failures = [failure_from_metrics(case.metrics) for case in cases]
+    breakdown: dict[str, int] = {}
+    retryable = 0
+    for failure in failures:
+        if failure is not None:
+            breakdown[failure.category] = breakdown.get(failure.category, 0) + 1
+            retryable += 1 if failure.retryable else 0
+
+    total = len(cases)
+    errored = sum(1 for case in cases if case.status is CaseStatus.ERROR)
+    return RunReliabilityReport(
+        total_cases=total,
+        errored_cases=errored,
+        classified_failures=sum(breakdown.values()),
+        unclassified_execution_failures=errored - sum(breakdown.values()),
+        retryable_failures=retryable,
+        failure_breakdown=dict(
+            sorted(breakdown.items(), key=lambda item: (-item[1], item[0]))
+        ),
+    )

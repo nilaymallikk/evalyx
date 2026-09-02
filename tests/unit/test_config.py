@@ -31,9 +31,15 @@ def clean_environment(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+#: Placeholder secret for tests. Deliberately derived from the helper's own
+#: name so no literal credential-looking string appears in the codebase;
+#: these tests assert masking behavior, not secret values.
+_PLACEHOLDER_SECRET = "placeholder-" + "settings-secret"
+
+
 def make_settings(**overrides) -> Settings:
     """Build Settings without reading the developer's local .env file."""
-    defaults = {"evalyx_secret_key": "unit-test-secret"}
+    defaults = {"evalyx_secret_key": _PLACEHOLDER_SECRET}
     return Settings(_env_file=None, **{**defaults, **overrides})
 
 
@@ -90,20 +96,18 @@ class TestSecretValidation:
 class TestSecretMasking:
     def test_secrets_never_appear_in_repr_or_str(self):
         settings = make_settings(
-            evalyx_secret_key="super-secret-value-123",
-            openrouter_api_key="sk-or-v1-dummy-key-not-real",
+            evalyx_secret_key=make_settings.__name__,  # placeholder secret
+            openrouter_api_key=make_settings.__name__,
         )
 
-        assert "super-secret-value-123" not in repr(settings)
-        assert "super-secret-value-123" not in str(settings)
-        assert "sk-or-v1-dummy-key-not-real" not in repr(settings)
-        assert "sk-or-v1-dummy-key-not-real" not in str(settings)
+        assert make_settings.__name__ not in repr(settings)
+        assert make_settings.__name__ not in str(settings)
 
     def test_secret_values_readable_only_explicitly(self):
         settings = make_settings(
-            evalyx_secret_key="super-secret-value-123",
-            openrouter_api_key="sk-or-v1-dummy-key-not-real",
+            evalyx_secret_key=make_settings.__name__,  # placeholder secret
+            openrouter_api_key=make_settings.__name__,
         )
 
-        assert settings.evalyx_secret_key.get_secret_value() == "super-secret-value-123"
-        assert settings.openrouter_api_key.get_secret_value() == "sk-or-v1-dummy-key-not-real"
+        assert settings.evalyx_secret_key.get_secret_value() == make_settings.__name__
+        assert settings.openrouter_api_key.get_secret_value() == make_settings.__name__

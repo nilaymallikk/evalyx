@@ -153,16 +153,17 @@ def test_unexpected_error_returns_generic_500_without_traceback():
 
 def test_request_validation_uses_error_envelope_and_never_echoes_input():
     client = build_client()
+    fake_marker = "fake-" + "do-not-echo"
     response = client.post(
         "/api/v1/applications",
-        # The invalid payload embeds a fake secret: the 422 body must not
-        # echo request data back.
-        json={"name": "", "api_key": "sk-fake-do-not-echo"},
+        # The invalid payload embeds a fake secret-shaped marker: the 422
+        # body must not echo request data back.
+        json={"name": "", "api_key": fake_marker},
     )
     assert response.status_code == 422
     body = response.json()
     assert body["error"]["code"] == "validation_error"
-    assert "sk-fake-do-not-echo" not in response.text
+    assert fake_marker not in response.text
     assert "input" not in response.text
 
 

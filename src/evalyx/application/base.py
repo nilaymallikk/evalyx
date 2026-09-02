@@ -49,7 +49,16 @@ class ApplicationInvocationError(Exception):
     *kind* only — never response bodies (which may echo prompts), headers,
     or credentials. The evaluation runner records these as per-case errors
     (like provider errors), so one failed invocation never kills a run.
+
+    ``attempts`` records how many transport attempts (including the first)
+    were made before giving up — set by transports that retry transient
+    failures; ``None`` when no retry layer is involved. Used only as typed
+    failure metadata; it never carries secrets.
     """
+
+    def __init__(self, message: str, *, attempts: int | None = None) -> None:
+        super().__init__(message)
+        self.attempts = attempts
 
 
 @runtime_checkable

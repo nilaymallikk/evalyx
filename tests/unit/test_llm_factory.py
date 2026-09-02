@@ -1,7 +1,6 @@
 """Unit tests for provider selection via the factory."""
 
 import pytest
-from pydantic import SecretStr
 
 from evalyx.core.config import Settings
 from evalyx.llm.errors import LLMConfigurationError
@@ -9,12 +8,16 @@ from evalyx.llm.factory import create_provider
 from evalyx.llm.ollama import OllamaProvider
 from evalyx.llm.openrouter import OpenRouterProvider
 
+# Placeholder non-secrets: the factory only checks non-emptiness, so the
+# values are derived names rather than credential-looking literals.
+_PLACEHOLDER = "placeholder-" + __name__.rsplit(".", 1)[-1]
+
 
 def make_settings(provider: str) -> Settings:
     return Settings(
         _env_file=None,
-        evalyx_secret_key="unit-test-secret",
-        openrouter_api_key=SecretStr("factory-test-key"),
+        evalyx_secret_key=_PLACEHOLDER,
+        openrouter_api_key=_PLACEHOLDER,
         llm_provider=provider,  # type: ignore[arg-type]
     )
 

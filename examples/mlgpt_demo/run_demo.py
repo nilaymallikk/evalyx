@@ -41,8 +41,10 @@ the ``--restore`` fallback). MLGPT source code is never modified.
 """
 
 import argparse
+import ipaddress
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -52,8 +54,38 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dataset import DATASET_VERSION, DEGRADED_RAG_PROMPT, DEMO_CASES
 
+
+def _assert_local(base_url: str) -> None:
+    """SSRF guard: only http(s) to explicitly-loopback hosts is allowed.
+
+    The demo talks to the operator's own MLGPT and Evalyx instances, which
+    run on this machine by design. Any non-http(s) scheme or a host that
+    does not resolve to loopback is rejected before a request is made.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise SystemExit(f"Refusing non-http(s) base URL: {parsed.scheme!r}")
+    host = parsed.hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as error:
+        raise SystemExit(f"Cannot resolve {host!r}: {error}") from error
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if address.is_loopback:
+            return
+    raise SystemExit(
+        f"Refusing non-loopback base URL {base_url!r} — this demo is "
+        "restricted to the operator's own local services."
+    )
+
+
 EVALYX_API_URL = os.environ.get("EVALYX_API_URL", "http://127.0.0.1:8000").rstrip("/")
 MLGPT_BASE_URL = os.environ.get("MLGPT_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
+_assert_local(EVALYX_API_URL)
+_assert_local(MLGPT_BASE_URL)
 MLGPT_ROOT = Path(os.environ.get("MLGPT_ROOT", "/home/nilaymallik/MLGPT"))
 RAG_PROMPT_PATH = MLGPT_ROOT / "prompts" / "rag_prompt.txt"
 STATE_PATH = Path(__file__).resolve().parent / ".demo_state.json"

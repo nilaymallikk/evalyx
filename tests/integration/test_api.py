@@ -78,6 +78,7 @@ async def seed_completed_run(
     application_id: uuid.UUID,
     dataset_version_id: uuid.UUID,
     outcomes: dict[str, tuple[CaseStatus, int]],
+    case_metrics: dict[str, dict] | None = None,
     case_ids: dict[str, uuid.UUID],
     guardrails: dict[str, list[tuple[str, GuardrailStatus]]] | None = None,
     judge_model: str | None = None,
@@ -103,6 +104,7 @@ async def seed_completed_run(
                 actual_output=None if status is CaseStatus.ERROR else f"reply:{name}",
                 latency_ms=latency if status is not CaseStatus.ERROR else None,
                 error="provider exploded" if status is CaseStatus.ERROR else None,
+                metrics=(case_metrics or {}).get(name),
             )
             for guardrail_name, verdict in (guardrails or {}).get(name, []):
                 await evaluations.add_guardrail_result(
@@ -193,6 +195,7 @@ async def test_duplicate_application_version_is_conflict(api):
 
 async def test_application_version_configuration_strips_secrets(api):
     client, _ = api
+    fake_marker = "fake-" + "do-not-persist"  # fake secret-shaped value
     app_data = await seed_application(client, "secret-config-app")
     response = await client.post(
         f"/api/v1/applications/{app_data['id']}/versions",
@@ -200,13 +203,13 @@ async def test_application_version_configuration_strips_secrets(api):
             "version": "v1",
             "configuration": {
                 "temperature": 0.2,
-                "api_key": "sk-secret-value-do-not-persist",
+                "api_key": fake_marker,
             },
         },
     )
     assert response.status_code == 201
     assert response.json()["configuration"] == {"temperature": 0.2}
-    assert "sk-secret-value-do-not-persist" not in response.text
+    assert fake_marker not in response.text
 
 
 # -- datasets & test cases ----------------------------------------------------------
@@ -683,3 +686,74 @@ async def test_no_secrets_or_pii_in_run_responses(api, clean_db, monkeypatch):
         assert "sk-fake-seed-value" not in response.text
         assert "OPENROUTER_API_KEY" not in response.text
         assert "Authorization" not in response.text
+
+
+# -- Phase 12: failure info & reliability summary ----------------------------------------
+
+
+async def test_case_results_expose_failure_info_and_reliability_summary(api, clean_db):
+    """Phase 12 surface: errored cases carry a typed `failure` object; the
+    reliability endpoint breaks execution failures down by category."""
+    client, _ = api
+    app_data = await seed_application(client, "reliability-app")
+    data = await seed_dataset(client, "reliability-dataset", ["ok", "outage", "limited", "old"])
+    case_ids = await seed_case_ids(clean_db, data["version"]["id"])
+    run_id = await seed_completed_run(
+        clean_db,
+        application_id=uuid.UUID(app_data["id"]),
+        dataset_version_id=uuid.UUID(data["version"]["id"]),
+        case_ids=case_ids,
+        outcomes={
+            "ok": (CaseStatus.PASSED, 100),
+            "outage": (CaseStatus.ERROR, 0),
+            "limited": (CaseStatus.ERROR, 0),
+            # "old" errors but has no classified failure (pre-Phase 12 row)
+            "old": (CaseStatus.ERROR, 0),
+        },
+        case_metrics={
+            "outage": {
+                "failure": {
+                    "category": "provider_unavailable",
+                    "reason": "Provider returned HTTP 502.",
+                    "retryable": True,
+                    "http_status": 502,
+                    "attempts": 3,
+                }
+            },
+            "limited": {
+                "failure": {
+                    "category": "rate_limited",
+                    "reason": "Provider rate limit reached (HTTP 429).",
+                    "retryable": True,
+                    "http_status": 429,
+                }
+            },
+        },
+    )
+
+    results = await client.get(f"/api/v1/evaluations/{run_id}/results")
+    assert results.status_code == 200
+    by_name = {i["input"]["prompt"]: i for i in results.json()["items"]}
+    assert by_name["outage"]["failure"]["category"] == "provider_unavailable"
+    assert by_name["outage"]["failure"]["attempts"] == 3
+    assert by_name["limited"]["failure"]["retryable"] is True
+    # quality outcomes and pre-Phase 12 rows have no failure object
+    assert by_name["ok"]["failure"] is None
+    assert by_name["old"]["failure"] is None
+
+    reliability = await client.get(f"/api/v1/evaluations/{run_id}/reliability")
+    assert reliability.status_code == 200
+    report = reliability.json()
+    assert report["total_cases"] == 4
+    assert report["errored_cases"] == 3
+    assert report["classified_failures"] == 2
+    assert report["unclassified_execution_failures"] == 1
+    assert report["retryable_failures"] == 2
+    # most frequent first; "old" is unclassified so it is absent here
+    assert list(report["failure_breakdown"].items()) == [
+        ("provider_unavailable", 1),
+        ("rate_limited", 1),
+    ]
+
+    # quality failures must not appear in the reliability breakdown
+    assert "failed" not in str(report["failure_breakdown"])

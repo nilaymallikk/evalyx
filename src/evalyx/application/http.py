@@ -92,7 +92,9 @@ class HttpApplicationTarget:
             "conversation_id": None,
         }
         last_error: ApplicationInvocationError | None = None
+        attempts = 0
         for attempt in range(MAX_ATTEMPTS):
+            attempts = attempt + 1
             try:
                 return await self._invoke_once(payload)
             except _TransientApplicationError as exc:
@@ -102,12 +104,13 @@ class HttpApplicationTarget:
                     logger.warning(
                         "application_invocation_retry",
                         application=self._application_name,
-                        attempt=attempt + 1,
+                        attempt=attempts,
                         next_delay_seconds=delay,
                         reason=exc.error.__class__.__name__,
                     )
                     await anyio.sleep(delay)
         assert last_error is not None  # loop ran at least once
+        last_error.attempts = attempts  # typed failure metadata (Phase 12)
         raise last_error
 
     async def _invoke_once(self, payload: dict) -> ApplicationResponse:

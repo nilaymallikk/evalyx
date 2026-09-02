@@ -139,6 +139,17 @@ async def test_application_invocation_failure_becomes_case_error(clean_db):
     assert summary.error_cases == 1
     assert summary.executed_cases == 1
 
+    # The failed case carries typed failure metadata (Phase 12); the
+    # passing one has none. Quality (guardrail) results stay separate.
+    async with clean_db.session() as session:
+        results = await EvaluationRepository().list_case_results(session, run_id)
+    errored = next(r for r in results if r.status is CaseStatus.ERROR)
+    ok = next(r for r in results if r.status is CaseStatus.EXECUTED)
+    assert errored.metrics["failure"]["category"] == "application_http_error"
+    assert errored.metrics["failure"]["http_status"] == 500
+    assert errored.metrics["failure"]["retryable"] is False
+    assert "failure" not in (ok.metrics or {})
+
 
 # -- gated live MLGPT tests ---------------------------------------------------------
 

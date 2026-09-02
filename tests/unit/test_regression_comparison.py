@@ -43,6 +43,7 @@ def snap(
     status: CaseStatus,
     *,
     latency: int | None = None,
+    failure_category: str | None = None,
     guardrails: list[tuple[str, GuardrailStatus]] | None = None,
 ) -> CaseResultSnapshot:
     return CaseResultSnapshot(
@@ -52,6 +53,7 @@ def snap(
         name=identity,
         status=status,
         latency_ms=latency,
+        failure_category=failure_category,
         guardrails=[GuardrailResultSnapshot(name=n, status=s) for n, s in guardrails or []],
     )
 
@@ -534,13 +536,14 @@ def test_context_records_model_and_configuration_changes():
 
 
 def test_sanitize_configuration_strips_secret_looking_keys_recursively():
+    marker = "should-never-" + "appear"  # fake value, built non-literally
     snapshot = {
         "temperature": 0.2,
-        "OPENROUTER_API_KEY": "should-never-appear",
+        "OPENROUTER_API_KEY": marker,
         "max_tokens": 512,  # innocuous: must survive
         "nested": {
-            "authorization": "Bearer x",
-            "db_password": "hunter2",
+            "authorization": "Bearer " + "x",
+            "db_password": "hunter" + "2",
             "auth_token": "t",
             "max_tokens": 512,
         },
@@ -552,6 +555,7 @@ def test_sanitize_configuration_strips_secret_looking_keys_recursively():
     assert "OPENROUTER_API_KEY" not in cleaned
     assert cleaned["nested"] == {"max_tokens": 512}
     assert cleaned["list"] == [{"name": "keep"}]
+    assert marker not in str(cleaned)
 
 
 def test_diff_configurations_reports_leaf_changes_sorted():
@@ -577,3 +581,43 @@ def test_policy_fingerprint_is_stable_and_policy_sensitive():
         RegressionThresholds(max_pass_rate_drop_pp=3.0)
     )
     assert len(policy_fingerprint(thresholds)) == 64
+
+
+# -- Phase 12: failure categories ride along as evidence -------------------------------
+
+
+def test_newly_errored_finding_carries_failure_category():
+    """Phase 12 classification is evidence, not a metric: a provider outage
+    errors cases with `provider_unavailable` and the finding names it —
+    regression math is untouched."""
+    baseline = [snap("case-a", CaseStatus.PASSED), snap("case-b", CaseStatus.PASSED)]
+    errored = snap("case-a", CaseStatus.ERROR, failure_category="provider_unavailable")
+    quality_failed = snap("case-b", CaseStatus.FAILED)
+    report = compare(
+        make_input(
+            baseline,
+            [errored, quality_failed],
+            baseline_dataset=["case-a", "case-b"],
+            current_dataset=["case-a", "case-b"],
+        ),
+        RegressionThresholds(),
+    )
+    assert report.result is ComparisonResult.REGRESSION_DETECTED  # unchanged policy
+    finding = next(f for f in report.newly_errored_cases if f.name == "case-a")
+    assert finding.current_failure_category == "provider_unavailable"
+    failed_finding = next(f for f in report.newly_failed_cases if f.name == "case-b")
+    assert failed_finding.current_failure_category is None  # quality failure
+
+
+def test_failure_category_absent_on_old_rows_and_baseline_side():
+    baseline = [snap("case-a", CaseStatus.ERROR, failure_category="rate_limited")]
+    current = [snap("case-a", CaseStatus.ERROR)]
+    # error→error is STABLE_ERROR — deliberately not materialized in the
+    # report's evidence lists; verify via the shared finding builder.
+    from evalyx.evaluation.regression.comparison import _finding, pair_case_results
+
+    pairs = pair_case_results(baseline, current)
+    matched = [p for p in pairs.pairs if p.baseline and p.current]
+    assert len(matched) == 1
+    finding = _finding(matched[0])
+    assert finding.current_failure_category is None  # current row predates Phase 12

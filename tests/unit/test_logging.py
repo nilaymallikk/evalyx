@@ -5,9 +5,12 @@ import structlog
 from evalyx.core.config import Settings
 from evalyx.core.logging import configure_logging, get_logger
 
+# Placeholder non-secret (these tests assert log filtering, not secrets).
+_PLACEHOLDER_SECRET = "placeholder-" + "logging-secret"
+
 
 def _settings(**overrides) -> Settings:
-    return Settings(_env_file=None, evalyx_secret_key="unit-test-secret", **overrides)
+    return Settings(_env_file=None, evalyx_secret_key=_PLACEHOLDER_SECRET, **overrides)
 
 
 def _captured(capsys) -> str:

@@ -337,6 +337,10 @@ class CaseResultSnapshot(BaseModel):
     name: str
     status: CaseStatus
     latency_ms: int | None = None
+    #: Classified execution-failure category (Phase 12), when the case
+    #: errored after classification existed. Informative only — it never
+    #: influences regression metrics or thresholds.
+    failure_category: str | None = None
     guardrails: list[GuardrailResultSnapshot] = Field(default_factory=list)
 
     @property
@@ -431,6 +435,10 @@ class CaseFinding(BaseModel):
     current_guardrail_failures: list[str]
     #: Guardrails that went pass → fail (the actionable signal).
     new_guardrail_failures: list[str]
+    #: Classified execution-failure category of the current side, when it
+    #: errored (Phase 12). Makes error deltas actionable: a newly errored
+    #: case tagged `provider_unavailable` is an outage, not an app bug.
+    current_failure_category: str | None = None
     #: Guardrails that went fail → pass.
     fixed_guardrail_failures: list[str]
 
