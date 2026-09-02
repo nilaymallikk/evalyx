@@ -6,6 +6,7 @@ The LLM provider is always a fake — no network calls.
 import uuid
 
 import pytest
+from tenant_helpers import integration_organization_id
 
 from evalyx.db.models import CaseStatus, GuardrailStatus
 from evalyx.db.repositories import (
@@ -70,8 +71,13 @@ async def seed_case(
         apps = ApplicationRepository()
         datasets = DatasetRepository()
         evals = EvaluationRepository()
-        app = await apps.create(session, name=f"app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"ds-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(
+            session, organization_id=org, name=f"app-{uuid.uuid4().hex[:8]}"
+        )
+        dataset = await datasets.create(
+            session, organization_id=org, name=f"ds-{uuid.uuid4().hex[:8]}"
+        )
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         case = await datasets.add_test_case(
             session,
@@ -82,6 +88,7 @@ async def seed_case(
         )
         run = await evals.create_run(
             session,
+            organization_id=org,
             application_id=app.id,
             dataset_version_id=version.id,
             agent_model=AGENT_MODEL,
@@ -238,8 +245,13 @@ async def test_pipeline_end_to_end_summary_counts(clean_db):
         apps = ApplicationRepository()
         datasets = DatasetRepository()
         evals = EvaluationRepository()
-        app = await apps.create(session, name=f"pipe-app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"pipe-ds-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(
+            session, organization_id=org, name=f"pipe-app-{uuid.uuid4().hex[:8]}"
+        )
+        dataset = await datasets.create(
+            session, organization_id=org, name=f"pipe-ds-{uuid.uuid4().hex[:8]}"
+        )
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         c1 = await datasets.add_test_case(
             session, dataset_version_id=version.id, name="clean",
@@ -255,6 +267,7 @@ async def test_pipeline_end_to_end_summary_counts(clean_db):
         )
         run = await evals.create_run(
             session,
+            organization_id=org,
             application_id=app.id,
             dataset_version_id=version.id,
             agent_model=AGENT_MODEL,

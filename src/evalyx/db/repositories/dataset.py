@@ -16,10 +16,13 @@ class DatasetRepository:
         self,
         session: AsyncSession,
         *,
+        organization_id: uuid.UUID,
         name: str,
         description: str | None = None,
     ) -> Dataset:
-        dataset = Dataset(name=name, description=description)
+        dataset = Dataset(
+            organization_id=organization_id, name=name, description=description
+        )
         session.add(dataset)
         await session.commit()
         await session.refresh(dataset)
@@ -28,9 +31,26 @@ class DatasetRepository:
     async def get(self, session: AsyncSession, dataset_id: uuid.UUID) -> Dataset | None:
         return await session.get(Dataset, dataset_id)
 
-    async def get_by_name(self, session: AsyncSession, name: str) -> Dataset | None:
-        result = await session.execute(select(Dataset).where(Dataset.name == name))
-        return result.scalar_one_or_none()
+    async def get_in_organization(
+        self,
+        session: AsyncSession,
+        dataset_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+    ) -> Dataset | None:
+        """Tenant-scoped fetch: other tenants' datasets read as missing."""
+        result = await session.scalars(
+            select(Dataset).filter_by(id=dataset_id, organization_id=organization_id)
+        )
+        return result.first()
+
+    async def get_by_name(
+        self, session: AsyncSession, *, organization_id: uuid.UUID, name: str
+    ) -> Dataset | None:
+        result = await session.scalars(
+            select(Dataset).filter_by(organization_id=organization_id, name=name)
+        )
+        return result.first()
 
     async def create_version(
         self,
@@ -80,6 +100,49 @@ class DatasetRepository:
         dataset_version_id: uuid.UUID,
     ) -> DatasetVersion | None:
         return await session.get(DatasetVersion, dataset_version_id)
+
+    async def get_version_in_organization(
+        self,
+        session: AsyncSession,
+        dataset_version_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+    ) -> DatasetVersion | None:
+        """Tenant-scoped version fetch via its parent dataset's tenant."""
+        result = await session.scalars(
+            select(DatasetVersion)
+            .join(Dataset, DatasetVersion.dataset_id == Dataset.id)
+            .where(
+                DatasetVersion.id == dataset_version_id,
+                Dataset.organization_id == organization_id,
+            )
+        )
+        return result.first()
+
+    async def get_version_in_organization_via_dataset(
+        self,
+        session: AsyncSession,
+        dataset_id: uuid.UUID,
+        version: int,
+        *,
+        organization_id: uuid.UUID,
+    ) -> DatasetVersion | None:
+        """Tenant-scoped (dataset id + version number) fetch.
+
+        The dataset must belong to the organization *and* the version must
+        belong to that dataset — one query enforces both, so a guessed
+        (dataset, version) pair from another tenant reads as missing.
+        """
+        result = await session.scalars(
+            select(DatasetVersion)
+            .join(Dataset, DatasetVersion.dataset_id == Dataset.id)
+            .where(
+                DatasetVersion.dataset_id == dataset_id,
+                DatasetVersion.version == version,
+                Dataset.organization_id == organization_id,
+            )
+        )
+        return result.first()
 
     async def list_versions(
         self,

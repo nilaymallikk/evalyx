@@ -11,6 +11,7 @@ import uuid
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+from tenant_helpers import integration_organization_id
 
 from evalyx.core.config import (
     Settings,  # noqa: F401 — parity with other integration tests
@@ -51,6 +52,12 @@ DOMAIN_TABLES = (
 )
 
 
+@pytest.fixture
+async def org_id(db_manager):
+    async with db_manager.session() as session:
+        return await integration_organization_id(session)
+
+
 async def seed_scenario(
     db: DatabaseManager,
     *,
@@ -68,8 +75,13 @@ async def seed_scenario(
         EvaluationRepository(),
     )
     async with db.session() as session:
-        app = await apps.create(session, name=f"regression-app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"regression-ds-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(
+            session, organization_id=org, name=f"regression-app-{uuid.uuid4().hex[:8]}"
+        )
+        dataset = await datasets.create(
+            session, organization_id=org, name=f"regression-ds-{uuid.uuid4().hex[:8]}"
+        )
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         case_ids: dict[str, uuid.UUID] = {}
         for name in [
@@ -91,6 +103,7 @@ async def seed_scenario(
 
         baseline = await evaluations.create_run(
             session,
+            organization_id=org,
             application_id=app.id,
             dataset_version_id=version.id,
             agent_model="agent-a",
@@ -99,6 +112,7 @@ async def seed_scenario(
         )
         current = await evaluations.create_run(
             session,
+            organization_id=org,
             application_id=app.id,
             dataset_version_id=version.id,
             agent_model="agent-a",
@@ -173,10 +187,10 @@ def service(db_manager: DatabaseManager) -> RegressionService:
 # -- persistence -----------------------------------------------------------------
 
 
-async def test_compare_persists_artifact_with_full_report(clean_db, service):
+async def test_compare_persists_artifact_with_full_report(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
 
-    report = await service.compare_runs(baseline_id, current_id)
+    report = await service.compare_runs(baseline_id, current_id, organization_id=org_id)
 
     assert report.comparison_id is not None
     assert report.created_at is not None
@@ -207,7 +221,7 @@ async def test_compare_persists_artifact_with_full_report(clean_db, service):
         assert row.summary["guardrail_comparisons"][0]["name"] == "pii"
 
 
-async def test_threshold_snapshot_is_persisted(clean_db, service):
+async def test_threshold_snapshot_is_persisted(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
     thresholds = RegressionThresholds(
         max_pass_rate_drop_pp=50.0,
@@ -215,10 +229,10 @@ async def test_threshold_snapshot_is_persisted(clean_db, service):
         max_guardrail_failure_rate_increase_pp=50.0,
         max_latency_increase_percent=None,
     )
-    report = await service.compare_runs(baseline_id, current_id, thresholds)
+    report = await service.compare_runs(baseline_id, current_id, thresholds, organization_id=org_id)
     assert report.result is ComparisonResult.NO_REGRESSION  # thresholds forbid any violation
 
-    reloaded = await service.get_report(report.comparison_id)
+    reloaded = await service.get_report(report.comparison_id, organization_id=org_id)
     assert reloaded.threshold_violations == []
     async with clean_db.session() as session:
         row = await RegressionRepository().get(session, report.comparison_id)
@@ -227,9 +241,9 @@ async def test_threshold_snapshot_is_persisted(clean_db, service):
         assert row.policy_fingerprint == policy_fingerprint(thresholds)
 
 
-async def test_persisted_summary_is_sanitized(clean_db, service):
+async def test_persisted_summary_is_sanitized(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db, with_secrets=True)
-    report = await service.compare_runs(baseline_id, current_id)
+    report = await service.compare_runs(baseline_id, current_id, organization_id=org_id)
 
     async with clean_db.session() as session:
         row = await RegressionRepository().get(session, report.comparison_id)
@@ -244,10 +258,10 @@ async def test_persisted_summary_is_sanitized(clean_db, service):
     assert changes["temperature"].current == 0.7
 
 
-async def test_get_report_round_trip(clean_db, service):
+async def test_get_report_round_trip(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
-    created = await service.compare_runs(baseline_id, current_id)
-    reloaded = await service.get_report(created.comparison_id)
+    created = await service.compare_runs(baseline_id, current_id, organization_id=org_id)
+    reloaded = await service.get_report(created.comparison_id, organization_id=org_id)
     assert reloaded.model_dump(exclude={"created_at"}) == created.model_dump(
         exclude={"created_at"}
     )
@@ -257,23 +271,25 @@ async def test_get_report_round_trip(clean_db, service):
 # -- idempotency & reproducibility -------------------------------------------------
 
 
-async def test_repeated_comparison_is_idempotent(clean_db, service):
+async def test_repeated_comparison_is_idempotent(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
-    first = await service.compare_runs(baseline_id, current_id)
-    second = await service.compare_runs(baseline_id, current_id)
+    first = await service.compare_runs(baseline_id, current_id, organization_id=org_id)
+    second = await service.compare_runs(baseline_id, current_id, organization_id=org_id)
 
     assert second.comparison_id == first.comparison_id
     assert second.created_at == first.created_at
     assert second.model_dump(exclude={"created_at"}) == first.model_dump(exclude={"created_at"})
 
     async with clean_db.session() as session:
-        rows = await RegressionRepository().list_for_run(session, baseline_id)
+        rows = await RegressionRepository().list_for_run(session, baseline_id, organization_id=org_id)
     assert len(rows) == 1
 
 
-async def test_different_thresholds_create_distinct_artifacts(clean_db, service):
+async def test_different_thresholds_create_distinct_artifacts(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
-    strict = await service.compare_runs(baseline_id, current_id, RegressionThresholds())
+    strict = await service.compare_runs(
+        baseline_id, current_id, RegressionThresholds(), organization_id=org_id
+    )
     lax = await service.compare_runs(
         baseline_id,
         current_id,
@@ -283,11 +299,12 @@ async def test_different_thresholds_create_distinct_artifacts(clean_db, service)
             max_guardrail_failure_rate_increase_pp=99.0,
             max_latency_increase_percent=None,
         ),
+        organization_id=org_id,
     )
     assert lax.comparison_id != strict.comparison_id
     assert lax.regression_detected is False
     async with clean_db.session() as session:
-        rows = await RegressionRepository().list_for_run(session, baseline_id)
+        rows = await RegressionRepository().list_for_run(session, baseline_id, organization_id=org_id)
     assert len(rows) == 2
     assert {r.result for r in rows} == {
         ComparisonResult.REGRESSION_DETECTED,
@@ -295,7 +312,7 @@ async def test_different_thresholds_create_distinct_artifacts(clean_db, service)
     }
 
 
-async def test_reproducibility_and_evaluation_immutability(clean_db, service):
+async def test_reproducibility_and_evaluation_immutability(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
 
     async def evaluation_snapshot():
@@ -321,8 +338,8 @@ async def test_reproducibility_and_evaluation_immutability(clean_db, service):
         return runs, cases, guardrails
 
     before = await evaluation_snapshot()
-    first = await service.compare_runs(baseline_id, current_id)
-    second = await service.compare_runs(baseline_id, current_id)
+    first = await service.compare_runs(baseline_id, current_id, organization_id=org_id)
+    second = await service.compare_runs(baseline_id, current_id, organization_id=org_id)
     after = await evaluation_snapshot()
 
     assert before == after  # historical evaluation data untouched
@@ -332,9 +349,9 @@ async def test_reproducibility_and_evaluation_immutability(clean_db, service):
 # -- database guarantees -----------------------------------------------------------
 
 
-async def test_referenced_run_deletion_is_restricted(clean_db, service):
+async def test_referenced_run_deletion_is_restricted(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
-    await service.compare_runs(baseline_id, current_id)
+    await service.compare_runs(baseline_id, current_id, organization_id=org_id)
 
     async with clean_db.engine.begin() as conn:
         with pytest.raises(IntegrityError):
@@ -365,18 +382,23 @@ async def test_database_check_constraint_rejects_self_comparison(clean_db):
 # -- compatibility rejection ---------------------------------------------------------
 
 
-async def make_minimal_run(clean_db, *, app_name: str, dataset_name: str) -> uuid.UUID:
+async def make_minimal_run(
+    clean_db, *, app_name: str, dataset_name: str, org: uuid.UUID | None = None
+) -> uuid.UUID:
     apps, datasets, evaluations = (
         ApplicationRepository(),
         DatasetRepository(),
         EvaluationRepository(),
     )
     async with clean_db.session() as session:
-        app = await apps.create(session, name=app_name)
-        dataset = await datasets.create(session, name=dataset_name)
+        if org is None:
+            org = await integration_organization_id(session)
+        app = await apps.create(session, organization_id=org, name=app_name)
+        dataset = await datasets.create(session, organization_id=org, name=dataset_name)
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         run = await evaluations.create_run(
             session,
+            organization_id=org,
             application_id=app.id,
             dataset_version_id=version.id,
             agent_model="agent-a",
@@ -384,10 +406,10 @@ async def make_minimal_run(clean_db, *, app_name: str, dataset_name: str) -> uui
     return run.id
 
 
-async def test_rejects_same_run_as_baseline_and_current(clean_db, service):
+async def test_rejects_same_run_as_baseline_and_current(clean_db, service, org_id):
     run_id, _ = await seed_scenario(clean_db)
     with pytest.raises(RegressionValidationError, match="itself"):
-        await service.compare_runs(run_id, run_id)
+        await service.compare_runs(run_id, run_id, organization_id=org_id)
 
 
 @pytest.mark.parametrize(
@@ -403,30 +425,37 @@ async def test_rejects_same_run_as_baseline_and_current(clean_db, service):
         (RunStatus.COMPLETED, RunStatus.CANCELLED),
     ],
 )
-async def test_rejects_non_completed_runs(clean_db, service, baseline_status, current_status):
+async def test_rejects_non_completed_runs(
+    clean_db, service, baseline_status, current_status, org_id
+):
     apps, datasets, evaluations = (
         ApplicationRepository(),
         DatasetRepository(),
         EvaluationRepository(),
     )
     async with clean_db.session() as session:
-        app = await apps.create(session, name=f"app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"ds-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(session, organization_id=org, name=f"app-{uuid.uuid4().hex[:8]}")
+        dataset = await datasets.create(session, organization_id=org, name=f"ds-{uuid.uuid4().hex[:8]}")
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         baseline = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=version.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=version.id, agent_model="m"
         )
         current = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=version.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=version.id, agent_model="m"
         )
         await evaluations.update_status(session, baseline, baseline_status)
         await evaluations.update_status(session, current, current_status)
 
     with pytest.raises(RegressionValidationError, match="completed"):
-        await service.compare_runs(baseline.id, current.id)
+        await service.compare_runs(baseline.id, current.id, organization_id=org_id)
 
 
-async def test_rejects_cross_application_comparisons(clean_db, service):
+async def test_rejects_cross_application_comparisons(clean_db, service, org_id):
     run_a = await make_minimal_run(
         clean_db, app_name=f"a-{uuid.uuid4().hex[:8]}", dataset_name=f"ad-{uuid.uuid4().hex[:8]}"
     )
@@ -439,10 +468,10 @@ async def test_rejects_cross_application_comparisons(clean_db, service):
         await EvaluationRepository().update_status(session, run_a_row, RunStatus.COMPLETED)
         await EvaluationRepository().update_status(session, run_b_row, RunStatus.COMPLETED)
     with pytest.raises(RegressionValidationError, match="different applications"):
-        await service.compare_runs(run_a, run_b)
+        await service.compare_runs(run_a, run_b, organization_id=org_id)
 
 
-async def test_rejects_different_datasets(clean_db, service):
+async def test_rejects_different_datasets(clean_db, service, org_id):
     # same application, two different datasets
     apps, datasets, evaluations = (
         ApplicationRepository(),
@@ -450,33 +479,38 @@ async def test_rejects_different_datasets(clean_db, service):
         EvaluationRepository(),
     )
     async with clean_db.session() as session:
-        app = await apps.create(session, name=f"app-{uuid.uuid4().hex[:8]}")
-        ds1 = await datasets.create(session, name=f"ds1-{uuid.uuid4().hex[:8]}")
-        ds2 = await datasets.create(session, name=f"ds2-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(session, organization_id=org, name=f"app-{uuid.uuid4().hex[:8]}")
+        ds1 = await datasets.create(session, organization_id=org, name=f"ds1-{uuid.uuid4().hex[:8]}")
+        ds2 = await datasets.create(session, organization_id=org, name=f"ds2-{uuid.uuid4().hex[:8]}")
         v1 = await datasets.create_version(session, dataset_id=ds1.id, version=1)
         v2 = await datasets.create_version(session, dataset_id=ds2.id, version=1)
         baseline = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=v1.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=v1.id, agent_model="m"
         )
         current = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=v2.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=v2.id, agent_model="m"
         )
         await evaluations.update_status(session, baseline, RunStatus.COMPLETED)
         await evaluations.update_status(session, current, RunStatus.COMPLETED)
 
     with pytest.raises(RegressionValidationError, match="different datasets"):
-        await service.compare_runs(baseline.id, current.id)
+        await service.compare_runs(baseline.id, current.id, organization_id=org_id)
 
 
-async def test_missing_run_raises_typed_error(clean_db, service):
+async def test_missing_run_raises_typed_error(clean_db, service, org_id):
     with pytest.raises(NotFoundError):
-        await service.compare_runs(uuid.uuid4(), uuid.uuid4())
+        await service.compare_runs(uuid.uuid4(), uuid.uuid4(), organization_id=org_id)
 
 
 # -- dataset versioning ---------------------------------------------------------------
 
 
-async def test_cross_version_comparison_matches_cases_by_name(clean_db, service):
+async def test_cross_version_comparison_matches_cases_by_name(clean_db, service, org_id):
     """v1 → baseline, v2 → current: common cases compare by name; v2's new
     case is reported separately; v1's dropped case counts as removed."""
     apps, datasets, evaluations = (
@@ -485,8 +519,9 @@ async def test_cross_version_comparison_matches_cases_by_name(clean_db, service)
         EvaluationRepository(),
     )
     async with clean_db.session() as session:
-        app = await apps.create(session, name=f"app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"ds-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(session, organization_id=org, name=f"app-{uuid.uuid4().hex[:8]}")
+        dataset = await datasets.create(session, organization_id=org, name=f"ds-{uuid.uuid4().hex[:8]}")
         v1 = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         v2 = await datasets.create_version(session, dataset_id=dataset.id, version=2)
         v1_cases: dict[str, uuid.UUID] = {}
@@ -503,10 +538,14 @@ async def test_cross_version_comparison_matches_cases_by_name(clean_db, service)
             v2_cases[name] = case.id
 
         baseline = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=v1.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=v1.id, agent_model="m"
         )
         current = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=v2.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=v2.id, agent_model="m"
         )
         outcomes = {
             baseline: {"c0": CaseStatus.PASSED, "c1": CaseStatus.PASSED,
@@ -528,7 +567,7 @@ async def test_cross_version_comparison_matches_cases_by_name(clean_db, service)
                 )
             await evaluations.update_status(session, run, RunStatus.COMPLETED)
 
-    report = await service.compare_runs(baseline.id, current.id)
+    report = await service.compare_runs(baseline.id, current.id, organization_id=org_id)
 
     assert report.matched_cases == 4  # c0..c3 matched by name
     assert report.new_cases == ["c-new"]
@@ -542,24 +581,29 @@ async def test_cross_version_comparison_matches_cases_by_name(clean_db, service)
 # -- degenerate data ------------------------------------------------------------------
 
 
-async def test_not_comparable_when_current_run_has_no_results(clean_db, service):
+async def test_not_comparable_when_current_run_has_no_results(clean_db, service, org_id):
     apps, datasets, evaluations = (
         ApplicationRepository(),
         DatasetRepository(),
         EvaluationRepository(),
     )
     async with clean_db.session() as session:
-        app = await apps.create(session, name=f"app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"ds-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(session, organization_id=org, name=f"app-{uuid.uuid4().hex[:8]}")
+        dataset = await datasets.create(session, organization_id=org, name=f"ds-{uuid.uuid4().hex[:8]}")
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         case = await datasets.add_test_case(
             session, dataset_version_id=version.id, name="c0", input={"prompt": "x"}
         )
         baseline = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=version.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=version.id, agent_model="m"
         )
         current = await evaluations.create_run(
-            session, application_id=app.id, dataset_version_id=version.id, agent_model="m"
+            session,
+            organization_id=org,
+            application_id=app.id, dataset_version_id=version.id, agent_model="m"
         )
         await evaluations.add_case_result(
             session,
@@ -571,7 +615,7 @@ async def test_not_comparable_when_current_run_has_no_results(clean_db, service)
         await evaluations.update_status(session, baseline, RunStatus.COMPLETED)
         await evaluations.update_status(session, current, RunStatus.COMPLETED)
 
-    report = await service.compare_runs(baseline.id, current.id)
+    report = await service.compare_runs(baseline.id, current.id, organization_id=org_id)
     assert report.result is ComparisonResult.NOT_COMPARABLE
     assert report.regression_detected is False
     assert report.not_comparable_reason is not None
@@ -579,12 +623,12 @@ async def test_not_comparable_when_current_run_has_no_results(clean_db, service)
     assert report.missing_case_results["current"] == ["c0"]
 
 
-async def test_list_for_run_returns_both_sides(clean_db, service):
+async def test_list_for_run_returns_both_sides(clean_db, service, org_id):
     baseline_id, current_id = await seed_scenario(clean_db)
-    await service.compare_runs(baseline_id, current_id)
+    await service.compare_runs(baseline_id, current_id, organization_id=org_id)
     async with clean_db.session() as session:
-        as_baseline = await RegressionRepository().list_for_run(session, baseline_id)
-        as_current = await RegressionRepository().list_for_run(session, current_id)
+        as_baseline = await RegressionRepository().list_for_run(session, baseline_id, organization_id=org_id)
+        as_current = await RegressionRepository().list_for_run(session, current_id, organization_id=org_id)
     assert len(as_baseline) == 1
     assert len(as_current) == 1
     assert as_baseline[0].id == as_current[0].id

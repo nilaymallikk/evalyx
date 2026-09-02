@@ -32,6 +32,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
+from evalyx.api.auth import (
+    AuthenticationError,
+    OrganizationRequiredError,
+    OrganizationRoleError,
+)
 from evalyx.api.middleware import SCOPE_REQUEST_ID_KEY
 from evalyx.core.context import get_request_id
 from evalyx.db.repositories import DuplicateVersionError, NotFoundError
@@ -67,9 +72,15 @@ class EvaluationSubmissionError(Exception):
         self.code = "evaluation_enqueue_failed"
 
 
-def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
+def _error_response(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     body = ErrorResponse(error=ErrorBody(code=code, message=message))
-    return JSONResponse(status_code=status_code, content=body.model_dump())
+    return JSONResponse(status_code=status_code, content=body.model_dump(), headers=headers)
 
 
 def register_error_handlers(app: FastAPI) -> None:
@@ -88,6 +99,32 @@ def register_error_handlers(app: FastAPI) -> None:
         summary = "; ".join(f"{d['loc']}: {d['msg']}" for d in details) or "Invalid request."
         return _error_response(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "validation_error", summary
+        )
+
+    @app.exception_handler(AuthenticationError)
+    async def _handle_authentication(_: Request, exc: AuthenticationError) -> JSONResponse:
+        # 401 with a kind-only message: no token contents, no Clerk details.
+        return _error_response(
+            status.HTTP_401_UNAUTHORIZED,
+            "authentication_failed",
+            str(exc),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @app.exception_handler(OrganizationRequiredError)
+    async def _handle_organization_required(
+        _: Request, exc: OrganizationRequiredError
+    ) -> JSONResponse:
+        return _error_response(
+            status.HTTP_403_FORBIDDEN, "organization_required", str(exc)
+        )
+
+    @app.exception_handler(OrganizationRoleError)
+    async def _handle_organization_role(
+        _: Request, exc: OrganizationRoleError
+    ) -> JSONResponse:
+        return _error_response(
+            status.HTTP_403_FORBIDDEN, "insufficient_role", str(exc)
         )
 
     @app.exception_handler(NotFoundError)

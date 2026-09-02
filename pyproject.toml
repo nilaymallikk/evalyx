@@ -5,10 +5,10 @@ description = "An AI evaluation and reliability platform for testing, observing,
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-
     "alembic>=1.19.1",
     "asyncpg>=0.31.0",
     "celery>=5.6.3",
+    "clerk-backend-api>=7.0.0",
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
     "opentelemetry-api>=1.44.0",

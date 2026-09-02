@@ -46,7 +46,7 @@ REGRESSION DETECTED
                 [hallucination, instruction_following]
 ```
 
-## Status: Phase 13 complete — documentation & recruiter demo (Phases 1–12 built)
+## Status: Phase 14 complete — Clerk authentication & multi-tenancy (Phases 1–13 built)
 
 ### Currently implemented
 
@@ -86,7 +86,9 @@ Clone, and in two terminals:
 docker compose up -d                                  # PostgreSQL (:5433) + Redis (:6379)
 uv sync                                               # install dependencies
 cp .env.example .env                                  # then fill in OPENROUTER_API_KEY
-                                                      # and EVALYX_SECRET_KEY
+                                                      # and EVALYX_SECRET_KEY; for API auth
+                                                      # add Clerk keys to .env.local (see
+                                                      # Authentication & multi-tenancy)
 # 2. API (terminal 1)
 uv run python main.py                                 # http://127.0.0.1:8000  (Swagger: /docs)
 
@@ -155,6 +157,63 @@ Design rules the codebase actually enforces:
   the regression engine never converts an outage into a quality drop.
 - **PostgreSQL is the state of record.** Celery/Redis carry operational
   task state only; the API reads authoritative state from PostgreSQL.
+
+## Authentication & multi-tenancy (Phase 14)
+
+**Clerk is the authentication provider; Clerk Organizations are the tenant
+boundary.** Clerk owns identity, organizations, memberships, and roles.
+Evalyx owns the evaluation domain data and enforces tenant isolation
+server-side.
+
+```text
+Evalyx CLI/TUI (future) ──Bearer <Clerk session token>──►  FastAPI REST API
+                                                                 │
+                                                   Clerk SDK verifies the
+                                                   token locally (JWKS)
+                                                                 │
+                     ┌───────────────────────────────────────────┘
+                     ▼
+             AuthContext (immutable): clerk_user_id, clerk_organization_id,
+             organization_role — the only identity Evalyx trusts
+                     │
+                     ▼
+   require_organization: Clerk org → local Organization row (workspace)
+                     │
+                     ▼
+   Tenant-scoped queries:  every resource read/write is filtered by
+   organization_id at the repository boundary — another tenant's resource
+   is indistinguishable from a missing one (uniform 404, no IDOR).
+```
+
+Key points:
+
+- **Request authentication.** Send `Authorization: Bearer <Clerk session
+  token>`. Verification uses the official Clerk backend SDK with the
+  instance's JWKS public key (local verification — no Clerk API round-trip
+  per request). Missing/invalid/expired tokens → `401`; valid user without
+  an active organization → `403 organization_required`; insufficient role →
+  `403 insufficient_role`. Error messages never echo token contents.
+- **Classification of endpoints.** `/health` and `/health/ready` stay
+  public; every `/api/v1` resource endpoint is tenant-scoped. OpenAPI
+  documents the `clerkAuth` bearer scheme.
+- **Roles.** Clerk organization roles are honored at the boundary: admin
+  role for privileged operations (workspace bootstrap), member for normal
+  work. Membership/roles are never stored in Evalyx — Clerk is the source
+  of truth; Evalyx keeps only the tenant mapping and an audit trail of
+  bootstrap events.
+- **Identity never comes from request data.** `user_id`,
+  `organization_id`, or `workspace_id` fields in request bodies/query
+  strings are ignored for authorization; identity flows exclusively from
+  the verified token through the `AuthContext`.
+- **Local development.** Set `CLERK_SECRET_KEY` and `CLERK_JWKS_URL` in
+  `.env.local` (gitignored) from your Clerk development instance, and set
+  `AUTH_REQUIRED=1` (the default). For fully local work without Clerk, set
+  `AUTH_REQUIRED=0`. Pre-multi-tenancy rows were migrated to a documented
+  deterministic development tenant (`org_dev_default`) by migration
+  `2d6765a1b770`.
+- **Future CLI/TUI.** `evalyx login` will obtain a Clerk session token and
+  the CLI will simply attach it as a bearer header to the same REST API —
+  no Evalyx database internals are exposed to clients.
 
 ## Local development
 

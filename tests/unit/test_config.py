@@ -39,7 +39,7 @@ _PLACEHOLDER_SECRET = "placeholder-" + "settings-secret"
 
 def make_settings(**overrides) -> Settings:
     """Build Settings without reading the developer's local .env file."""
-    defaults = {"evalyx_secret_key": _PLACEHOLDER_SECRET}
+    defaults = {"evalyx_secret_key": _PLACEHOLDER_SECRET, "auth_required": False}
     return Settings(_env_file=None, **{**defaults, **overrides})
 
 

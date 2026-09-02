@@ -7,6 +7,9 @@ import pytest
 # Provide a safe test default so Settings can always be constructed in the
 # test environment, regardless of the developer's local `.env`.
 os.environ.setdefault("EVALYX_SECRET_KEY", "test-only-secret-key")
+# Hermetic suite: no Clerk. Tenant-scoped API tests inject a fake verifier;
+# everything else constructs Settings freely.
+os.environ.setdefault("AUTH_REQUIRED", "0")
 
 
 def pytest_collection_modifyitems(config, items):

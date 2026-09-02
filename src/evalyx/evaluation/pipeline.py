@@ -59,6 +59,7 @@ class EvaluationPipeline:
     async def run_and_score(
         self,
         *,
+        organization_id: uuid.UUID,
         application_id: uuid.UUID,
         dataset_version_id: uuid.UUID,
         agent_model: str,
@@ -68,6 +69,7 @@ class EvaluationPipeline:
     ) -> EvaluationSummary:
         """Create, execute, and score an evaluation run."""
         execution = await self._runner.run(
+            organization_id=organization_id,
             application_id=application_id,
             dataset_version_id=dataset_version_id,
             agent_model=agent_model,

@@ -19,6 +19,7 @@ def make_settings(provider: str) -> Settings:
         evalyx_secret_key=_PLACEHOLDER,
         openrouter_api_key=_PLACEHOLDER,
         llm_provider=provider,  # type: ignore[arg-type]
+        auth_required=False,
     )
 
 

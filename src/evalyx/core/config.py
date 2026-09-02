@@ -14,8 +14,6 @@ Rules:
 from functools import lru_cache
 from typing import Literal
 
-from typing import Literal
-
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,7 +35,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", ".env.local"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -62,6 +60,20 @@ class Settings(BaseSettings):
     # Application-under-test targets (reference demo: MLGPT RAG chatbot on
     # its documented default port). Server-side only — never sent to clients.
     mlgpt_base_url: str = "http://127.0.0.1:8001"
+
+    # Clerk authentication (Phase 14). Clerk owns identity + organizations;
+    # Evalyx owns the domain data and tenant scoping. The secret key is a
+    # SecretStr (never logged/repr'd); the JWKS URL enables local public-key
+    # verification of session tokens instead of Clerk API round-trips.
+    # When clerk_jwks_url is empty, authentication is disabled (local dev
+    # without Clerk) — auth_required below makes that explicit.
+    clerk_secret_key: SecretStr = SecretStr("")
+    clerk_jwks_url: str = ""
+    clerk_authorized_parties: str = ""
+
+    #: Master switch for API authentication. True in production; may be
+    #: disabled in local development when Clerk is not configured.
+    auth_required: bool = True
 
     # Security
     evalyx_secret_key: SecretStr = SecretStr("")
@@ -104,7 +116,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_secrets(self) -> "Settings":
+    def _validate_secrets(self) -> Settings:
         """Fail fast with clear errors on unsafe secret configuration."""
         if self.evalyx_secret_key.get_secret_value().strip() == "":
             raise ValueError(
@@ -119,6 +131,19 @@ class Settings(BaseSettings):
                 "EVALYX_SECRET_KEY must be replaced with a real generated secret "
                 "when APP_ENV=production."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_clerk_settings(self) -> Settings:
+        """Clerk must be fully configured when authentication is required."""
+        if self.auth_required and self.clerk_jwks_url.strip() == "":
+            raise ValueError(
+                "AUTH_REQUIRED=1 requires CLERK_JWKS_URL (Clerk instance's "
+                ".well-known/jwks.json URL). To run without Clerk locally, "
+                "set AUTH_REQUIRED=0."
+            )
+        if self.auth_required and self.clerk_secret_key.get_secret_value().strip() == "":
+            raise ValueError("AUTH_REQUIRED=1 requires CLERK_SECRET_KEY.")
         return self
 
     @property

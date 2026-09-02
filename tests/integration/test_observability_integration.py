@@ -13,6 +13,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from structlog.testing import capture_logs
+from tenant_helpers import integration_organization_id
 from test_runner import DOMAIN_TABLES, FakeProvider, seed
 
 from evalyx.core.metrics import metrics
@@ -32,8 +33,26 @@ async def clean_db(db_manager):
 @pytest.fixture
 async def api(clean_db, settings):
     from evalyx.api.app import create_app
+    from evalyx.api.auth import AuthContext, OrganizationRole
+    from evalyx.api.dependencies import require_organization
 
     app = create_app(settings, database=clean_db)
+
+    async def _fake_tenant():
+        from evalyx.db.tenancy import require_organization as resolve_row
+
+        async with clean_db.session() as s:
+            organization = await resolve_row(s, "org_integration_test")
+        return (
+            AuthContext(
+                clerk_user_id="integration-user",
+                clerk_organization_id="org_integration_test",
+                organization_role=OrganizationRole.ADMIN,
+            ),
+            organization,
+        )
+
+    app.dependency_overrides[require_organization] = _fake_tenant
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client, app
@@ -269,9 +288,13 @@ async def test_regression_comparison_logs_and_metrics(clean_db):
 
     baseline_id, current_id = await seed_scenario(clean_db)
     service = RegressionService(clean_db.session_factory)
+    async with clean_db.session() as session:
+        org = await integration_organization_id(session)
 
     with capture_logs() as logs:
-        report = await service.compare_runs(baseline_id, current_id)
+        report = await service.compare_runs(
+            baseline_id, current_id, organization_id=org
+        )
     assert report.result.value == "regression_detected"
 
     started = [e for e in logs if e["event"] == "regression_comparison_started"]
@@ -297,7 +320,10 @@ async def test_regression_comparison_logs_and_metrics(clean_db):
     # Second comparison (idempotent reuse) still logs + counts.
     with capture_logs() as logs2:
         await service.compare_runs(
-            baseline_id, current_id, thresholds=RegressionThresholds()
+            baseline_id,
+            current_id,
+            thresholds=RegressionThresholds(),
+            organization_id=org,
         )
     reused = [e for e in logs2 if e["event"] == "regression_comparison_completed"]
     assert reused[0]["reused"] is True

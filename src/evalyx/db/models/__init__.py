@@ -14,6 +14,7 @@ from evalyx.db.models.evaluation import (
     RunStatus,
 )
 from evalyx.db.models.guardrail import GuardrailResult, GuardrailStatus
+from evalyx.db.models.organization import Organization, OrganizationMembershipAudit
 from evalyx.db.models.regression import ComparisonResult, RegressionComparison
 
 __all__ = [
@@ -28,6 +29,8 @@ __all__ = [
     "EvaluationRun",
     "GuardrailResult",
     "GuardrailStatus",
+    "Organization",
+    "OrganizationMembershipAudit",
     "RegressionComparison",
     "RunStatus",
     "TestCase",

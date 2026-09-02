@@ -81,6 +81,6 @@ class GuardrailResult(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     reason: Mapped[str | None] = mapped_column(Text)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
 
-    evaluation_case_result: Mapped["EvaluationCaseResult"] = relationship(
+    evaluation_case_result: Mapped[EvaluationCaseResult] = relationship(
         back_populates="guardrail_results"
     )

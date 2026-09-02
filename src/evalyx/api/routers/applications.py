@@ -6,7 +6,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from evalyx.api.dependencies import get_session, pagination_params
+from evalyx.api.auth import AuthContext
+from evalyx.api.dependencies import (
+    get_session,
+    pagination_params,
+    require_organization,
+)
 from evalyx.api.schemas.applications import (
     ApplicationCreate,
     ApplicationResponse,
@@ -14,7 +19,7 @@ from evalyx.api.schemas.applications import (
     ApplicationVersionResponse,
 )
 from evalyx.api.schemas.common import Page
-from evalyx.db.models import Application, ApplicationVersion
+from evalyx.db.models import Application, ApplicationVersion, Organization
 from evalyx.db.repositories import ApplicationRepository, NotFoundError
 
 router = APIRouter(prefix="/applications", tags=["applications"])
@@ -39,9 +44,14 @@ def _repository() -> ApplicationRepository:
 async def create_application(
     payload: ApplicationCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> Application:
+    _auth, organization = context
     return await _repository().create(
-        session, name=payload.name, description=payload.description
+        session,
+        organization_id=organization.id,
+        name=payload.name,
+        description=payload.description,
     )
 
 
@@ -54,8 +64,12 @@ async def create_application(
 async def get_application(
     application_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> Application:
-    application = await _repository().get(session, application_id)
+    _auth, organization = context
+    application = await _repository().get_in_organization(
+        session, application_id, organization_id=organization.id
+    )
     if application is None:
         raise NotFoundError(f"Application {application_id} does not exist.")
     return application
@@ -71,10 +85,17 @@ async def list_application_versions(
     application_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     pagination: Annotated[tuple[int, int], Depends(pagination_params)],
+    context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> Page[ApplicationVersionResponse]:
     limit, offset = pagination
+    _auth, organization = context
     repository = _repository()
-    if await repository.get(session, application_id) is None:
+    if (
+        await repository.get_in_organization(
+            session, application_id, organization_id=organization.id
+        )
+        is None
+    ):
         raise NotFoundError(f"Application {application_id} does not exist.")
     versions = await repository.list_versions(session, application_id)
     items = [
@@ -106,7 +127,16 @@ async def create_application_version(
     application_id: uuid.UUID,
     payload: ApplicationVersionCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> ApplicationVersion:
+    _auth, organization = context
+    if (
+        await _repository().get_in_organization(
+            session, application_id, organization_id=organization.id
+        )
+        is None
+    ):
+        raise NotFoundError(f"Application {application_id} does not exist.")
     return await _repository().create_version(
         session,
         application_id=application_id,

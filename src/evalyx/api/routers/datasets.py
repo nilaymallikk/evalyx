@@ -10,7 +10,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from evalyx.api.dependencies import get_session, pagination_params
+from evalyx.api.auth import AuthContext
+from evalyx.api.dependencies import (
+    get_session,
+    pagination_params,
+    require_organization,
+)
 from evalyx.api.schemas.common import Page
 from evalyx.api.schemas.datasets import (
     DatasetCreate,
@@ -20,11 +25,14 @@ from evalyx.api.schemas.datasets import (
     TestCaseCreate,
     TestCaseResponse,
 )
-from evalyx.db.models import Dataset, DatasetVersion, TestCase
+from evalyx.db.models import Dataset, DatasetVersion, Organization, TestCase
 from evalyx.db.repositories import DatasetRepository, NotFoundError
 from evalyx.evaluation.regression.comparison import sanitize_configuration
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
+
+#: Authenticated + tenant-resolved dependency (Clerk org → local workspace).
+TenantContext = Annotated[tuple[AuthContext, Organization], Depends(require_organization)]
 
 
 def _repository() -> DatasetRepository:
@@ -47,9 +55,16 @@ def _test_case_response(case: TestCase) -> TestCaseResponse:
 
 
 async def _get_version_or_404(
-    session: AsyncSession, dataset_id: uuid.UUID, version: int
+    session: AsyncSession,
+    dataset_id: uuid.UUID,
+    version: int,
+    *,
+    organization_id: uuid.UUID,
 ):
-    dataset_version = await _repository().get_version(session, dataset_id, version)
+    """Tenant-scoped version fetch: the parent dataset must be the caller's."""
+    dataset_version = await _repository().get_version_in_organization_via_dataset(
+        session, dataset_id, version, organization_id=organization_id
+    )
     if dataset_version is None:
         raise NotFoundError(
             f"Dataset version {version} of dataset {dataset_id} does not exist."
@@ -67,9 +82,14 @@ async def _get_version_or_404(
 async def create_dataset(
     payload: DatasetCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: TenantContext,
 ) -> Dataset:
+    _auth, organization = context
     return await _repository().create(
-        session, name=payload.name, description=payload.description
+        session,
+        organization_id=organization.id,
+        name=payload.name,
+        description=payload.description,
     )
 
 
@@ -82,8 +102,12 @@ async def create_dataset(
 async def get_dataset(
     dataset_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: TenantContext,
 ) -> Dataset:
-    dataset = await _repository().get(session, dataset_id)
+    _auth, organization = context
+    dataset = await _repository().get_in_organization(
+        session, dataset_id, organization_id=organization.id
+    )
     if dataset is None:
         raise NotFoundError(f"Dataset {dataset_id} does not exist.")
     return dataset
@@ -99,10 +123,17 @@ async def list_dataset_versions(
     dataset_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     pagination: Annotated[tuple[int, int], Depends(pagination_params)],
+    context: TenantContext,
 ) -> Page[DatasetVersionResponse]:
     limit, offset = pagination
+    _auth, organization = context
     repository = _repository()
-    if await repository.get(session, dataset_id) is None:
+    if (
+        await repository.get_in_organization(
+            session, dataset_id, organization_id=organization.id
+        )
+        is None
+    ):
         raise NotFoundError(f"Dataset {dataset_id} does not exist.")
     versions = await repository.list_versions(session, dataset_id)
     items = [
@@ -132,7 +163,16 @@ async def create_dataset_version(
     dataset_id: uuid.UUID,
     payload: DatasetVersionCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: TenantContext,
 ) -> DatasetVersion:
+    _auth, organization = context
+    if (
+        await _repository().get_in_organization(
+            session, dataset_id, organization_id=organization.id
+        )
+        is None
+    ):
+        raise NotFoundError(f"Dataset {dataset_id} does not exist.")
     return await _repository().create_version(
         session, dataset_id=dataset_id, version=payload.version, description=payload.description
     )
@@ -154,8 +194,12 @@ async def add_test_case(
     version: int,
     payload: TestCaseCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: TenantContext,
 ) -> TestCaseResponse:
-    dataset_version = await _get_version_or_404(session, dataset_id, version)
+    _auth, organization = context
+    dataset_version = await _get_version_or_404(
+        session, dataset_id, version, organization_id=organization.id
+    )
     case = await _repository().add_test_case(
         session,
         dataset_version_id=dataset_version.id,
@@ -180,9 +224,13 @@ async def list_test_cases(
     version: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     pagination: Annotated[tuple[int, int], Depends(pagination_params)],
+    context: TenantContext,
 ) -> Page[TestCaseResponse]:
     limit, offset = pagination
-    dataset_version = await _get_version_or_404(session, dataset_id, version)
+    _auth, organization = context
+    dataset_version = await _get_version_or_404(
+        session, dataset_id, version, organization_id=organization.id
+    )
     cases = await _repository().list_test_cases(session, dataset_version.id)
     items = [_test_case_response(case) for case in cases[offset : offset + limit]]
     return Page[TestCaseResponse](

@@ -28,6 +28,7 @@ class EvaluationRepository:
         self,
         session: AsyncSession,
         *,
+        organization_id: uuid.UUID,
         application_id: uuid.UUID,
         dataset_version_id: uuid.UUID,
         agent_model: str,
@@ -36,6 +37,7 @@ class EvaluationRepository:
         configuration_snapshot: dict | None = None,
     ) -> EvaluationRun:
         run = EvaluationRun(
+            organization_id=organization_id,
             application_id=application_id,
             application_version_id=application_version_id,
             dataset_version_id=dataset_version_id,
@@ -55,6 +57,19 @@ class EvaluationRepository:
         run_id: uuid.UUID,
     ) -> EvaluationRun | None:
         return await session.get(EvaluationRun, run_id)
+
+    async def get_run_in_organization(
+        self,
+        session: AsyncSession,
+        run_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+    ) -> EvaluationRun | None:
+        """Tenant-scoped fetch: other tenants' runs read as missing."""
+        result = await session.scalars(
+            select(EvaluationRun).filter_by(id=run_id, organization_id=organization_id)
+        )
+        return result.first()
 
     async def update_status(
         self,
@@ -121,8 +136,13 @@ class EvaluationRepository:
         limit: int | None = None,
         offset: int = 0,
         application_id: uuid.UUID | None = None,
+        organization_id: uuid.UUID | None = None,
     ) -> list[EvaluationRun]:
         """List runs newest first, optionally filtered by application.
+
+        Tenant-aware: ``organization_id`` scopes the listing to one
+        organization; the API always supplies it (internal callers such as
+        the worker may omit it for a specific run they already verified).
 
         ``limit``/``offset`` back API pagination; ``None`` (repository
         default) preserves the unpaginated behavior for internal callers.
@@ -134,6 +154,8 @@ class EvaluationRepository:
         )
         if application_id is not None:
             query = query.where(EvaluationRun.application_id == application_id)
+        if organization_id is not None:
+            query = query.where(EvaluationRun.organization_id == organization_id)
         if offset:
             query = query.offset(offset)
         if limit is not None:

@@ -79,15 +79,20 @@ class EvaluationService:
         self._datasets = DatasetRepository()
         self._evaluations = EvaluationRepository()
 
-    async def submit(self, request: EvaluationCreate) -> tuple[EvaluationRun, str | None]:
+    async def submit(
+        self, request: EvaluationCreate, *, organization_id: uuid.UUID
+    ) -> tuple[EvaluationRun, str | None]:
         """Validate, persist, and enqueue one evaluation run.
 
-        Returns ``(run, task_id)``. Raises :class:`NotFoundError` for missing
-        references and :class:`EvaluationSubmissionError` when enqueueing
-        fails (the run is marked ``failed`` before that).
+        ``organization_id`` is the authenticated tenant (from the verified
+        Clerk session, never from request data). Every referenced resource
+        must belong to it. Returns ``(run, task_id)``. Raises
+        :class:`NotFoundError` for missing/foreign references and
+        :class:`EvaluationSubmissionError` when enqueueing fails (the run is
+        marked ``failed`` before that).
         """
         async with self._session_factory() as session:
-            run = await self._create_run(session, request)
+            run = await self._create_run(session, request, organization_id=organization_id)
 
         task_id: str | None
         try:
@@ -118,9 +123,21 @@ class EvaluationService:
         )
         return run, task_id
 
-    async def _create_run(self, session: AsyncSession, request: EvaluationCreate) -> EvaluationRun:
-        """Validate references and persist the pending run (commits)."""
-        application = await self._applications.get(session, request.application_id)
+    async def _create_run(
+        self,
+        session: AsyncSession,
+        request: EvaluationCreate,
+        *,
+        organization_id: uuid.UUID,
+    ) -> EvaluationRun:
+        """Validate references and persist the pending run (commits).
+
+        All references are tenant-checked: a foreign application or dataset
+        version is indistinguishable from a missing one (404).
+        """
+        application = await self._applications.get_in_organization(
+            session, request.application_id, organization_id=organization_id
+        )
         if application is None:
             raise NotFoundError(f"Application {request.application_id} does not exist.")
 
@@ -132,8 +149,8 @@ class EvaluationService:
                     f"exist for application {request.application_id}."
                 )
 
-        dataset_version = await self._datasets.get_version_by_id(
-            session, request.dataset_version_id
+        dataset_version = await self._datasets.get_version_in_organization(
+            session, request.dataset_version_id, organization_id=organization_id
         )
         if dataset_version is None:
             raise NotFoundError(
@@ -142,6 +159,7 @@ class EvaluationService:
 
         return await self._evaluations.create_run(
             session,
+            organization_id=organization_id,
             application_id=request.application_id,
             application_version_id=request.application_version_id,
             dataset_version_id=request.dataset_version_id,

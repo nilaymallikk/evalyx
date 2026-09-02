@@ -111,9 +111,13 @@ class RegressionService:
         baseline_run_id: uuid.UUID,
         current_run_id: uuid.UUID,
         thresholds: RegressionThresholds | None = None,
+        *,
+        organization_id: uuid.UUID,
     ) -> RegressionReport:
         """Compare two completed runs and return the typed regression report.
 
+        ``organization_id`` is the authenticated tenant: both runs must
+        belong to it, and the persisted artifact is stored under it.
         Repeated calls with the same pair and the same threshold policy are
         idempotent: the original artifact is returned unchanged.
         """
@@ -128,7 +132,7 @@ class RegressionService:
 
         async with self._session_factory() as session:
             input_data = await self._build_comparison_input(
-                session, baseline_run_id, current_run_id
+                session, baseline_run_id, current_run_id, organization_id=organization_id
             )
             report = compare(input_data, thresholds)
 
@@ -137,6 +141,7 @@ class RegressionService:
                 baseline_run_id=baseline_run_id,
                 current_run_id=current_run_id,
                 policy_fingerprint=fingerprint,
+                organization_id=organization_id,
             )
             if existing is not None:
                 report.comparison_id = existing.id
@@ -146,6 +151,7 @@ class RegressionService:
 
             comparison = await self._regressions.create(
                 session,
+                organization_id=organization_id,
                 baseline_run_id=baseline_run_id,
                 current_run_id=current_run_id,
                 result=report.result,
@@ -184,18 +190,29 @@ class RegressionService:
             "regression_comparisons_total", {"result": report.result.value}
         )
 
-    async def get_report(self, comparison_id: uuid.UUID) -> RegressionReport:
-        """Reload a persisted comparison as a typed report."""
+    async def get_report(
+        self, comparison_id: uuid.UUID, *, organization_id: uuid.UUID
+    ) -> RegressionReport:
+        """Reload a persisted comparison as a typed report (tenant-scoped).
+
+        Other tenants' comparisons read as missing (uniform 404).
+        """
         async with self._session_factory() as session:
-            comparison = await self._regressions.get(session, comparison_id)
+            comparison = await self._regressions.get_in_organization(
+                session, comparison_id, organization_id=organization_id
+            )
         if comparison is None:
             raise NotFoundError(f"Regression comparison {comparison_id} does not exist.")
         return comparison_to_report(comparison)
 
-    async def list_for_run(self, run_id: uuid.UUID) -> list[RegressionReport]:
-        """All comparisons involving ``run_id`` (either side), newest first."""
+    async def list_for_run(
+        self, run_id: uuid.UUID, *, organization_id: uuid.UUID
+    ) -> list[RegressionReport]:
+        """All tenant comparisons involving ``run_id`` (either side)."""
         async with self._session_factory() as session:
-            comparisons = await self._regressions.list_for_run(session, run_id)
+            comparisons = await self._regressions.list_for_run(
+                session, run_id, organization_id=organization_id
+            )
         return [comparison_to_report(comparison) for comparison in comparisons]
 
     # -- loading & validation -------------------------------------------------
@@ -205,6 +222,8 @@ class RegressionService:
         session: AsyncSession,
         baseline_run_id: uuid.UUID,
         current_run_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
     ) -> ComparisonInput:
         if baseline_run_id == current_run_id:
             raise RegressionValidationError(
@@ -212,10 +231,14 @@ class RegressionService:
                 f"({baseline_run_id} was given as both baseline and current)."
             )
 
-        baseline_run = await self._evaluations.get_run(session, baseline_run_id)
+        baseline_run = await self._evaluations.get_run_in_organization(
+            session, baseline_run_id, organization_id=organization_id
+        )
         if baseline_run is None:
             raise NotFoundError(f"Evaluation run {baseline_run_id} does not exist.")
-        current_run = await self._evaluations.get_run(session, current_run_id)
+        current_run = await self._evaluations.get_run_in_organization(
+            session, current_run_id, organization_id=organization_id
+        )
         if current_run is None:
             raise NotFoundError(f"Evaluation run {current_run_id} does not exist.")
 

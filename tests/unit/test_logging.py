@@ -1,6 +1,5 @@
 """Unit tests for the logging foundation. No network access required."""
 
-import structlog
 
 from evalyx.core.config import Settings
 from evalyx.core.logging import configure_logging, get_logger
@@ -10,7 +9,12 @@ _PLACEHOLDER_SECRET = "placeholder-" + "logging-secret"
 
 
 def _settings(**overrides) -> Settings:
-    return Settings(_env_file=None, evalyx_secret_key=_PLACEHOLDER_SECRET, **overrides)
+    return Settings(
+        _env_file=None,
+        evalyx_secret_key=_PLACEHOLDER_SECRET,
+        auth_required=False,
+        **overrides,
+    )
 
 
 def _captured(capsys) -> str:

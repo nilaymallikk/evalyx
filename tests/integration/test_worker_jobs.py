@@ -10,6 +10,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from tenant_helpers import integration_organization_id
 
 from evalyx.core.config import Settings
 from evalyx.db.models import CaseStatus, RunStatus
@@ -74,8 +75,13 @@ async def seed(db_manager: DatabaseManager, *, case_inputs: list):
             DatasetRepository(),
             EvaluationRepository(),
         )
-        app = await apps.create(session, name=f"app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"dataset-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        app = await apps.create(
+            session, organization_id=org, name=f"app-{uuid.uuid4().hex[:8]}"
+        )
+        dataset = await datasets.create(
+            session, organization_id=org, name=f"dataset-{uuid.uuid4().hex[:8]}"
+        )
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         case_ids = []
         for index, case_input in enumerate(case_inputs):
@@ -89,6 +95,7 @@ async def seed(db_manager: DatabaseManager, *, case_inputs: list):
             case_ids.append(case.id)
         run = await evaluations.create_run(
             session,
+            organization_id=org,
             application_id=app.id,
             dataset_version_id=version.id,
             agent_model="agent-model:free",

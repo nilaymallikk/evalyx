@@ -13,18 +13,26 @@ DOMAIN_TABLES = (
     "guardrail_results",
     "evaluation_case_results",
     "evaluation_runs",
+    "regression_comparisons",
     "test_cases",
     "dataset_versions",
     "datasets",
     "application_versions",
     "applications",
+    "organization_membership_audit",
+    "organizations",
 )
 
 
 @pytest.fixture
 def settings() -> Settings:
-    """Real application settings; the Evalyx database lives on localhost:5433."""
-    return Settings()
+    """Real application settings; the Evalyx database lives on localhost:5433.
+
+    Clerk is bypassed in integration tests: resource endpoints resolve the
+    fake tenant via the dependency override in the ``api`` fixture. Auth
+    behavior itself is covered hermetically in tests/unit/test_auth_api.py.
+    """
+    return Settings(auth_required=False)
 
 
 @pytest.fixture

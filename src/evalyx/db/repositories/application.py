@@ -16,21 +16,47 @@ class ApplicationRepository:
         self,
         session: AsyncSession,
         *,
+        organization_id: uuid.UUID,
         name: str,
         description: str | None = None,
     ) -> Application:
-        application = Application(name=name, description=description)
+        application = Application(
+            organization_id=organization_id, name=name, description=description
+        )
         session.add(application)
         await session.commit()
         await session.refresh(application)
         return application
 
-    async def get(self, session: AsyncSession, application_id: uuid.UUID) -> Application | None:
+    async def get(
+        self, session: AsyncSession, application_id: uuid.UUID
+    ) -> Application | None:
         return await session.get(Application, application_id)
 
-    async def get_by_name(self, session: AsyncSession, name: str) -> Application | None:
-        result = await session.execute(select(Application).where(Application.name == name))
-        return result.scalar_one_or_none()
+    async def get_in_organization(
+        self,
+        session: AsyncSession,
+        application_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+    ) -> Application | None:
+        """Tenant-scoped fetch: other tenants' applications read as missing."""
+        result = await session.scalars(
+            select(Application).filter_by(
+                id=application_id, organization_id=organization_id
+            )
+        )
+        return result.first()
+
+    async def get_by_name(
+        self, session: AsyncSession, *, organization_id: uuid.UUID, name: str
+    ) -> Application | None:
+        result = await session.scalars(
+            select(Application).filter_by(
+                organization_id=organization_id, name=name
+            )
+        )
+        return result.first()
 
     async def create_version(
         self,

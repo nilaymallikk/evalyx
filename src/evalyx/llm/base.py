@@ -23,7 +23,6 @@ from pydantic import BaseModel, Field
 
 from evalyx.llm.errors import (
     LLMConnectionError,
-    LLMRateLimitError,
     LLMTimeoutError,
 )
 
@@ -180,9 +179,9 @@ def _log_provider_retry(
 
 __all__ = [
     "DEFAULT_TIMEOUT",
+    "RETRYABLE_STATUS_CODES",
     "LLMProvider",
     "LLMResponse",
-    "RETRYABLE_STATUS_CODES",
     "RetryPolicy",
     "TokenUsage",
     "send_with_retries",

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from evalyx.db.models import TestCase
 
 
-def build_prompt(test_case: "TestCase") -> str:
+def build_prompt(test_case: TestCase) -> str:
     """Build the user prompt sent to the provider for one test case."""
     core = _core_request(test_case.input)
     context = test_case.context

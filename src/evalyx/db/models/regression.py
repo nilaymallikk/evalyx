@@ -95,6 +95,14 @@ class RegressionComparison(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
         index=True,
         nullable=False,
     )
+    #: Denormalized tenant column: both runs must belong to the same
+    #: organization (enforced by the service). Scoping by it lets a tenant
+    #: list its own comparisons without joining through runs.
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
 
     #: Top-level decision (``regression_detected`` mirrors it as a bool for
     #: cheap filtering; ``result`` is the source of truth).

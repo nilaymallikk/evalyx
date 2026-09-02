@@ -173,6 +173,7 @@ class EvaluationRunner:
     async def run(
         self,
         *,
+        organization_id: uuid.UUID,
         application_id: uuid.UUID,
         dataset_version_id: uuid.UUID,
         agent_model: str,
@@ -180,10 +181,15 @@ class EvaluationRunner:
         application_version_id: uuid.UUID | None = None,
         configuration_snapshot: dict | None = None,
     ) -> EvaluationSummary:
-        """Create a new evaluation run and execute it to completion."""
+        """Create a new evaluation run and execute it to completion.
+
+        ``organization_id`` is the tenant that will own the run (verified
+        upstream; the runner never accepts tenant identity from payloads).
+        """
         async with self._session_factory() as session:
             run = await self._evaluations.create_run(
                 session,
+                organization_id=organization_id,
                 application_id=application_id,
                 dataset_version_id=dataset_version_id,
                 agent_model=agent_model,

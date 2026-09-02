@@ -11,11 +11,13 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import (
     get_evaluation_service,
     get_regression_service,
     get_session,
     pagination_params,
+    require_organization,
 )
 from evalyx.api.schemas.common import Page
 from evalyx.api.schemas.evaluations import (
@@ -29,7 +31,13 @@ from evalyx.api.schemas.evaluations import (
     failure_from_metrics,
 )
 from evalyx.api.services import EvaluationService
-from evalyx.db.models import CaseStatus, EvaluationCaseResult, EvaluationRun, RunStatus
+from evalyx.db.models import (
+    CaseStatus,
+    EvaluationCaseResult,
+    EvaluationRun,
+    Organization,
+    RunStatus,
+)
 from evalyx.db.repositories import EvaluationRepository, NotFoundError
 from evalyx.evaluation.regression.comparison import sanitize_configuration
 from evalyx.evaluation.regression.models import RegressionReport
@@ -37,13 +45,24 @@ from evalyx.evaluation.regression.service import RegressionService
 
 router = APIRouter(prefix="/evaluations", tags=["evaluations"])
 
+#: Authenticated + tenant-resolved dependency (Clerk org → local workspace).
+TenantContext = Annotated[tuple[AuthContext, Organization], Depends(require_organization)]
+
 
 def _repository() -> EvaluationRepository:
     return EvaluationRepository()
 
 
-async def _get_run_or_404(session: AsyncSession, run_id: uuid.UUID) -> EvaluationRun:
-    run = await _repository().get_run(session, run_id)
+async def _get_run_or_404(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    *,
+    organization_id: uuid.UUID,
+) -> EvaluationRun:
+    """Tenant-scoped run fetch: foreign runs read as missing (uniform 404)."""
+    run = await _repository().get_run_in_organization(
+        session, run_id, organization_id=organization_id
+    )
     if run is None:
         raise NotFoundError(f"Evaluation run {run_id} does not exist.")
     return run
@@ -143,9 +162,12 @@ def _to_case_result(
 )
 async def submit_evaluation(
     payload: EvaluationCreate,
+    session: Annotated[AsyncSession, Depends(get_session)],
     service: Annotated[EvaluationService, Depends(get_evaluation_service)],
+    context: TenantContext,
 ) -> EvaluationSubmissionResponse:
-    run, task_id = await service.submit(payload)
+    _auth, organization = context
+    run, task_id = await service.submit(payload, organization_id=organization.id)
     return EvaluationSubmissionResponse(
         run_id=run.id,
         status=run.status,
@@ -168,8 +190,10 @@ async def submit_evaluation(
 async def get_evaluation(
     run_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: TenantContext,
 ) -> EvaluationRunSummary:
-    run = await _get_run_or_404(session, run_id)
+    _auth, organization = context
+    run = await _get_run_or_404(session, run_id, organization_id=organization.id)
     counts = await _repository().count_case_results_by_status(session, run_id)
     return _to_summary(run, _counts_from(counts))
 
@@ -183,16 +207,24 @@ async def get_evaluation(
 async def list_evaluations(
     session: Annotated[AsyncSession, Depends(get_session)],
     pagination: Annotated[tuple[int, int], Depends(pagination_params)],
+    context: TenantContext,
     application_id: uuid.UUID | None = None,
 ) -> Page[EvaluationRunSummary]:
     limit, offset = pagination
+    _auth, organization = context
     repository = _repository()
     runs = await repository.list_runs(
-        session, limit=limit, offset=offset, application_id=application_id
+        session,
+        limit=limit,
+        offset=offset,
+        application_id=application_id,
+        organization_id=organization.id,
     )
     items = [_to_summary(run, None) for run in runs]
     # Total via one cheap count query with the same filter.
-    count_query = select(func.count()).select_from(EvaluationRun)
+    count_query = select(func.count()).select_from(EvaluationRun).where(
+        EvaluationRun.organization_id == organization.id
+    )
     if application_id is not None:
         count_query = count_query.where(EvaluationRun.application_id == application_id)
     total = int((await session.execute(count_query)).scalar_one())
@@ -214,10 +246,12 @@ async def get_evaluation_results(
     run_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     pagination: Annotated[tuple[int, int], Depends(pagination_params)],
+    context: TenantContext,
 ) -> Page[EvaluationCaseResultResponse]:
     limit, offset = pagination
+    _auth, organization = context
     repository = _repository()
-    await _get_run_or_404(session, run_id)
+    await _get_run_or_404(session, run_id, organization_id=organization.id)
 
     counts = await repository.count_case_results_by_status(session, run_id)
     cases = await repository.list_case_results(session, run_id, limit=limit, offset=offset)
@@ -251,10 +285,12 @@ async def get_evaluation_guardrails(
     run_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     pagination: Annotated[tuple[int, int], Depends(pagination_params)],
+    context: TenantContext,
 ) -> Page[GuardrailResultResponse]:
     limit, offset = pagination
+    _auth, organization = context
     repository = _repository()
-    await _get_run_or_404(session, run_id)
+    await _get_run_or_404(session, run_id, organization_id=organization.id)
     guardrails = await repository.list_guardrail_results_for_run(
         session, run_id, limit=limit, offset=offset
     )
@@ -281,9 +317,11 @@ async def list_regressions_for_run(
     run_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     service: Annotated[RegressionService, Depends(get_regression_service)],
+    context: TenantContext,
 ) -> Page[RegressionReport]:
-    await _get_run_or_404(session, run_id)
-    reports = await service.list_for_run(run_id)
+    _auth, organization = context
+    await _get_run_or_404(session, run_id, organization_id=organization.id)
+    reports = await service.list_for_run(run_id, organization_id=organization.id)
     return Page[RegressionReport](
         items=reports, total=len(reports), limit=len(reports), offset=0
     )
@@ -300,8 +338,10 @@ async def list_regressions_for_run(
 async def get_evaluation_status(
     run_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: TenantContext,
 ) -> RunStatus:
-    run = await _get_run_or_404(session, run_id)
+    _auth, organization = context
+    run = await _get_run_or_404(session, run_id, organization_id=organization.id)
     return run.status
 
 
@@ -322,8 +362,10 @@ async def get_evaluation_status(
 async def get_run_reliability(
     run_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
+    context: TenantContext,
 ) -> RunReliabilityReport:
-    await _get_run_or_404(session, run_id)
+    _auth, organization = context
+    await _get_run_or_404(session, run_id, organization_id=organization.id)
     cases = await _repository().list_case_results(session, run_id)
 
     failures = [failure_from_metrics(case.metrics) for case in cases]

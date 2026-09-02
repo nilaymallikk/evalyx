@@ -13,10 +13,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 from evalyx.api.app import create_app
-from evalyx.api.dependencies import get_evaluation_service
+from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.dependencies import get_evaluation_service, require_organization
 from evalyx.api.errors import EvaluationSubmissionError, register_error_handlers
 from evalyx.core.config import Settings
-from evalyx.db.models import RunStatus
+from evalyx.db.models import Organization, RunStatus
 from evalyx.db.repositories import DuplicateVersionError, NotFoundError
 
 MAJOR_API_PATHS = (
@@ -38,8 +39,23 @@ MAJOR_API_PATHS = (
 
 
 def build_client() -> TestClient:
-    """Offline client: no lifespan (no connections), no DB-touching calls."""
-    return TestClient(create_app(Settings()))
+    """Offline client: no lifespan (no connections), no DB-touching calls.
+
+    Tenant authentication is bypassed with a fixed fake organization — these
+    tests exercise validation/error mapping, not Clerk (dedicated suite:
+    tests/unit/test_auth_api.py).
+    """
+    app = create_app(Settings(auth_required=False))
+    fake_context = (
+        AuthContext(
+            clerk_user_id="unit-test-user",
+            clerk_organization_id="org_unit_test",
+            organization_role=OrganizationRole.ADMIN,
+        ),
+        Organization(name="Unit Test Org"),
+    )
+    app.dependency_overrides[require_organization] = lambda: fake_context
+    return TestClient(app)
 
 
 # -- application factory & OpenAPI ------------------------------------------------
@@ -199,8 +215,8 @@ class FakeEvaluationService:
         self.submitted: list = []
         self._fail_enqueue = fail_enqueue
 
-    async def submit(self, request):
-        self.submitted.append(request)
+    async def submit(self, request, *, organization_id):
+        self.submitted.append((request, organization_id))
         if self._fail_enqueue:
             raise EvaluationSubmissionError(
                 str(uuid.uuid4()), "queue rejected the job"

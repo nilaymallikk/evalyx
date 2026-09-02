@@ -19,6 +19,7 @@ import structlog
 from fastapi import FastAPI, Response
 from redis.asyncio import Redis
 
+from evalyx.api.auth import create_token_verifier
 from evalyx.api.errors import register_error_handlers
 from evalyx.api.middleware import ObservabilityMiddleware
 from evalyx.api.routers import api_router
@@ -64,15 +65,41 @@ def create_app(
             "AI evaluation and reliability platform: register applications, "
             "version datasets, submit background evaluations, inspect "
             "results, and compare runs for regressions. All resource "
-            "endpoints live under the `/api/v1` prefix. "
-            "Authentication/authorization is **not implemented yet** — this "
-            "API is intended for local development and portfolio use."
+            "endpoints live under the `/api/v1` prefix and are "
+            "authenticated with Clerk (bearer session token); resources are "
+            "scoped to the caller's Clerk organization. Health endpoints "
+            "are public."
         ),
         lifespan=lifespan,
     )
     app.state.settings = settings
     app.state.database = database
     app.state.redis = redis_client
+    app.state.token_verifier = create_token_verifier(settings)
+
+    # OpenAPI: document Clerk bearer authentication (the future CLI/TUI
+    # sends `Authorization: Bearer <Clerk session token>`).
+    def _decorate_openapi() -> None:
+        def _openapi_with_auth() -> dict:
+            schema = FastAPI.openapi(app)
+            schema.setdefault("components", {})["securitySchemes"] = {
+                "clerkAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                    "description": "Clerk session token (Bearer).",
+                }
+            }
+            for path_item in schema.get("paths", {}).values():
+                for operation in path_item.values():
+                    if isinstance(operation, dict):
+                        operation.setdefault("security", [{"clerkAuth": []}])
+            return schema
+
+        # Standard FastAPI customization pattern (docs: overriding openapi()).
+        app.openapi = _openapi_with_auth  # type: ignore[method-assign]
+
+    _decorate_openapi()
 
     register_error_handlers(app)
     # Outermost user middleware: request correlation, structured lifecycle

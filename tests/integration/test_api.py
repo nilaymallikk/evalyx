@@ -14,7 +14,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 from evalyx.api.app import create_app
-from evalyx.api.dependencies import get_evaluation_service
+from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.dependencies import get_evaluation_service, require_organization
 from evalyx.api.services import EvaluationService
 from evalyx.core.config import Settings
 from evalyx.db.models import CaseStatus, GuardrailStatus, RunStatus
@@ -27,11 +28,39 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 async def api(clean_db: DatabaseManager, settings: Settings):
-    """HTTP client wired to the truncated test database (no lifespan)."""
+    """HTTP client wired to the truncated test database (no lifespan).
+
+    Tenant authentication is bypassed with a fixed organization; the
+    dedicated multi-tenancy suite (test_api_multi_tenant.py) exercises two
+    organizations and cross-tenant rejection.
+    """
     app = create_app(settings, database=clean_db)
+    app.dependency_overrides[require_organization] = _fake_require_organization(
+        clean_db, clerk_org_id="org_integration_test"
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client, app
+
+
+def _fake_require_organization(db: DatabaseManager, *, clerk_org_id: str):
+    """Dependency override resolving the fake Clerk org to a real local row."""
+
+    async def _resolve():
+        from evalyx.db.tenancy import require_organization as resolve_row
+
+        async with db.session() as s:
+            organization = await resolve_row(s, clerk_org_id)
+        return (
+            AuthContext(
+                clerk_user_id="integration-user",
+                clerk_organization_id=clerk_org_id,
+                organization_role=OrganizationRole.ADMIN,
+            ),
+            organization,
+        )
+
+    return _resolve
 
 
 async def seed_application(client: AsyncClient, name: str) -> dict:
@@ -86,8 +115,12 @@ async def seed_completed_run(
     """Seed one completed run through repositories (worker-equivalent state)."""
     evaluations = EvaluationRepository()
     async with db.session() as session:
+        from evalyx.db.tenancy import require_organization as resolve_row
+
+        organization = await resolve_row(session, "org_integration_test")
         run = await evaluations.create_run(
             session,
+            organization_id=organization.id,
             application_id=application_id,
             dataset_version_id=dataset_version_id,
             agent_model="agent-a",
@@ -596,6 +629,7 @@ async def test_regression_detected_not_comparable_and_invalid_requests(api, clea
         assert baseline_run is not None
         pending_run = await evaluations.create_run(
             session,
+            organization_id=baseline_run.organization_id,
             application_id=baseline_run.application_id,
             dataset_version_id=baseline_run.dataset_version_id,
             agent_model="m",

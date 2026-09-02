@@ -5,11 +5,13 @@ container, never the unrelated native PostgreSQL on 5432) and clean up by
 truncating domain tables before each test.
 """
 
+import uuid
 from datetime import datetime
 from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import IntegrityError
+from tenant_helpers import integration_organization_id
 
 from evalyx.db.models import CaseStatus, RunStatus
 from evalyx.db.repositories import (
@@ -19,6 +21,12 @@ from evalyx.db.repositories import (
     EvaluationRepository,
     NotFoundError,
 )
+
+
+@pytest.fixture
+async def org_id(db_session) -> uuid.UUID:
+    """The test tenant id; rows are created under it for scoping parity."""
+    return await integration_organization_id(db_session)
 
 pytestmark = pytest.mark.integration
 
@@ -38,9 +46,9 @@ def evaluations() -> EvaluationRepository:
     return EvaluationRepository()
 
 
-async def test_application_create_and_retrieve(db_session, applications):
+async def test_application_create_and_retrieve(db_session, applications, org_id):
     created = await applications.create(
-        db_session, name="support-agent", description="Customer support agent"
+        db_session, organization_id=org_id, name="support-agent", description="Customer support agent"
     )
 
     fetched = await applications.get(db_session, created.id)
@@ -51,8 +59,8 @@ async def test_application_create_and_retrieve(db_session, applications):
     assert fetched.updated_at.tzinfo is not None
 
 
-async def test_application_version_create_and_duplicate_rejected(db_session, applications):
-    app = await applications.create(db_session, name="versioned-agent")
+async def test_application_version_create_and_duplicate_rejected(db_session, applications, org_id):
+    app = await applications.create(db_session, organization_id=org_id, name="versioned-agent")
 
     v1 = await applications.create_version(
         db_session,
@@ -69,11 +77,11 @@ async def test_application_version_create_and_duplicate_rejected(db_session, app
         )
 
 
-async def test_dataset_and_version_lifecycle(db_session, datasets):
-    dataset = await datasets.create(db_session, name="support-regression-set")
+async def test_dataset_and_version_lifecycle(db_session, datasets, org_id):
+    dataset = await datasets.create(db_session, organization_id=org_id, name="support-regression-set")
 
     v1 = await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
-    v2 = await datasets.create_version(
+    await datasets.create_version(
         db_session, dataset_id=dataset.id, version=2, description="Added adversarial cases"
     )
 
@@ -83,19 +91,19 @@ async def test_dataset_and_version_lifecycle(db_session, datasets):
     assert v1.created_at.tzinfo is not None
 
 
-async def test_duplicate_dataset_version_rejected(db_session, datasets):
-    dataset = await datasets.create(db_session, name="dup-version-set")
+async def test_duplicate_dataset_version_rejected(db_session, datasets, org_id):
+    dataset = await datasets.create(db_session, organization_id=org_id, name="dup-version-set")
     await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
 
     with pytest.raises(DuplicateVersionError):
         await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
 
 
-async def test_dataset_version_uniqueness_enforced_in_database(db_session, datasets):
+async def test_dataset_version_uniqueness_enforced_in_database(db_session, datasets, org_id):
     """Bypass the repository to prove the DB unique constraint protects v1."""
     from evalyx.db.models import DatasetVersion
 
-    dataset = await datasets.create(db_session, name="db-constraint-set")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="db-constraint-set")
     await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
 
     db_session.add(DatasetVersion(dataset_id=dataset.id, version=1))
@@ -104,9 +112,9 @@ async def test_dataset_version_uniqueness_enforced_in_database(db_session, datas
     await db_session.rollback()
 
 
-async def test_dataset_version_content_cannot_be_overwritten(db_session, datasets):
+async def test_dataset_version_content_cannot_be_overwritten(db_session, datasets, org_id):
     """v1 stays v1: adding v2 does not mutate v1 or its test cases."""
-    dataset = await datasets.create(db_session, name="immutable-set")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="immutable-set")
     v1 = await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
     case = await datasets.add_test_case(
         db_session,
@@ -125,8 +133,8 @@ async def test_dataset_version_content_cannot_be_overwritten(db_session, dataset
     assert cases_after[0].input == {"question": "What is your refund policy?"}
 
 
-async def test_test_case_create_and_retrieve(db_session, datasets):
-    dataset = await datasets.create(db_session, name="testcase-set")
+async def test_test_case_create_and_retrieve(db_session, datasets, org_id):
+    dataset = await datasets.create(db_session, organization_id=org_id, name="testcase-set")
     version = await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
 
     case = await datasets.add_test_case(
@@ -148,7 +156,7 @@ async def test_test_case_create_and_retrieve(db_session, datasets):
     assert fetched.created_at.tzinfo is not None
 
 
-async def test_add_test_case_to_missing_version_raises(db_session, datasets):
+async def test_add_test_case_to_missing_version_raises(db_session, datasets, org_id):
     with pytest.raises(NotFoundError):
         await datasets.add_test_case(
             db_session, dataset_version_id=uuid4(), name="orphan", input={}
@@ -156,13 +164,13 @@ async def test_add_test_case_to_missing_version_raises(db_session, datasets):
 
 
 async def test_evaluation_run_preserves_configuration_snapshot(
-    db_session, applications, datasets, evaluations
+    db_session, applications, datasets, evaluations, org_id
 ):
-    app = await applications.create(db_session, name="snapshot-agent")
+    app = await applications.create(db_session, organization_id=org_id, name="snapshot-agent")
     app_version = await applications.create_version(
         db_session, application_id=app.id, version="1.0.0"
     )
-    dataset = await datasets.create(db_session, name="snapshot-set")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="snapshot-set")
     dataset_version = await datasets.create_version(
         db_session, dataset_id=dataset.id, version=1
     )
@@ -174,6 +182,7 @@ async def test_evaluation_run_preserves_configuration_snapshot(
     }
     run = await evaluations.create_run(
         db_session,
+        organization_id=org_id,
         application_id=app.id,
         application_version_id=app_version.id,
         dataset_version_id=dataset_version.id,
@@ -197,13 +206,14 @@ async def test_evaluation_run_preserves_configuration_snapshot(
 
 
 async def test_run_status_transitions_track_lifecycle_timestamps(
-    db_session, applications, datasets, evaluations
+    db_session, applications, datasets, evaluations, org_id
 ):
-    app = await applications.create(db_session, name="lifecycle-agent")
-    dataset = await datasets.create(db_session, name="lifecycle-set")
+    app = await applications.create(db_session, organization_id=org_id, name="lifecycle-agent")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="lifecycle-set")
     version = await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
     run = await evaluations.create_run(
         db_session,
+        organization_id=org_id,
         application_id=app.id,
         dataset_version_id=version.id,
         agent_model="agent-model:free",
@@ -220,10 +230,10 @@ async def test_run_status_transitions_track_lifecycle_timestamps(
 
 
 async def test_case_result_associated_with_run_and_test_case(
-    db_session, applications, datasets, evaluations
+    db_session, applications, datasets, evaluations, org_id
 ):
-    app = await applications.create(db_session, name="results-agent")
-    dataset = await datasets.create(db_session, name="results-set")
+    app = await applications.create(db_session, organization_id=org_id, name="results-agent")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="results-set")
     version = await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
     case = await datasets.add_test_case(
         db_session,
@@ -234,6 +244,7 @@ async def test_case_result_associated_with_run_and_test_case(
     )
     run = await evaluations.create_run(
         db_session,
+        organization_id=org_id,
         application_id=app.id,
         dataset_version_id=version.id,
         agent_model="agent-model:free",
@@ -266,16 +277,17 @@ async def test_case_result_associated_with_run_and_test_case(
 
 
 async def test_multiple_guardrail_results_for_one_case(
-    db_session, applications, datasets, evaluations
+    db_session, applications, datasets, evaluations, org_id
 ):
-    app = await applications.create(db_session, name="guardrail-agent")
-    dataset = await datasets.create(db_session, name="guardrail-set")
+    app = await applications.create(db_session, organization_id=org_id, name="guardrail-agent")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="guardrail-set")
     version = await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
     case = await datasets.add_test_case(
         db_session, dataset_version_id=version.id, name="guarded-case", input={"q": "hi"}
     )
     run = await evaluations.create_run(
         db_session,
+        organization_id=org_id,
         application_id=app.id,
         dataset_version_id=version.id,
         agent_model="agent-model:free",
@@ -310,14 +322,15 @@ async def test_multiple_guardrail_results_for_one_case(
     assert all(g.created_at.tzinfo is not None for g in guardrails)
 
 
-async def test_foreign_keys_enforced(db_session, applications, datasets, evaluations):
-    app = await applications.create(db_session, name="fk-agent")
+async def test_foreign_keys_enforced(db_session, applications, datasets, evaluations, org_id):
+    app = await applications.create(db_session, organization_id=org_id, name="fk-agent")
     app_id = app.id  # captured before rollbacks expire ORM instances
 
     # Run referencing a non-existent dataset version.
     with pytest.raises(IntegrityError):
         await evaluations.create_run(
             db_session,
+            organization_id=org_id,
             application_id=app_id,
             dataset_version_id=uuid4(),
             agent_model="agent-model:free",
@@ -327,10 +340,11 @@ async def test_foreign_keys_enforced(db_session, applications, datasets, evaluat
     # Rollback expired instances; re-fetch what we still need.
     app = await applications.get(db_session, app_id)
 
-    dataset = await datasets.create(db_session, name="fk-set")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="fk-set")
     version = await datasets.create_version(db_session, dataset_id=dataset.id, version=1)
     run = await evaluations.create_run(
         db_session,
+        organization_id=org_id,
         application_id=app.id,
         dataset_version_id=version.id,
         agent_model="agent-model:free",
@@ -359,16 +373,16 @@ async def test_foreign_keys_enforced(db_session, applications, datasets, evaluat
         )
 
 
-async def test_full_reproducibility_flow(db_session, applications, datasets, evaluations):
+async def test_full_reproducibility_flow(db_session, applications, datasets, evaluations, org_id):
     """End-to-end: run configuration remains fully reconstructable."""
-    app = await applications.create(db_session, name="repro-agent")
+    app = await applications.create(db_session, organization_id=org_id, name="repro-agent")
     app_version = await applications.create_version(
         db_session,
         application_id=app.id,
         version="2.1.0",
         configuration={"prompt_template": "support-v2"},
     )
-    dataset = await datasets.create(db_session, name="repro-set")
+    dataset = await datasets.create(db_session, organization_id=org_id, name="repro-set")
     version = await datasets.create_version(db_session, dataset_id=dataset.id, version=3)
     case = await datasets.add_test_case(
         db_session,
@@ -380,6 +394,7 @@ async def test_full_reproducibility_flow(db_session, applications, datasets, eva
 
     run = await evaluations.create_run(
         db_session,
+        organization_id=org_id,
         application_id=app.id,
         application_version_id=app_version.id,
         dataset_version_id=version.id,

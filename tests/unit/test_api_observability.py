@@ -11,14 +11,28 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 from evalyx.api.app import create_app
-from evalyx.api.dependencies import get_session
+from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.dependencies import get_session, require_organization
 from evalyx.core.config import Settings
 from evalyx.core.metrics import metrics
+from evalyx.db.models import Organization
 
 
 def build_client(settings: Settings | None = None) -> TestClient:
     # No lifespan execution: no database/Redis connections are opened.
-    return TestClient(create_app(settings or Settings()))
+    # Tenant authentication is bypassed (observability is auth-agnostic);
+    # Clerk behavior has its own suite (tests/unit/test_auth_api.py).
+    app = create_app(settings or Settings(auth_required=False))
+    fake_context = (
+        AuthContext(
+            clerk_user_id="unit-test-user",
+            clerk_organization_id="org_unit_test",
+            organization_role=OrganizationRole.ADMIN,
+        ),
+        Organization(name="Unit Test Org"),
+    )
+    app.dependency_overrides[require_organization] = lambda: fake_context
+    return TestClient(app)
 
 
 def setup_function(_: object) -> None:

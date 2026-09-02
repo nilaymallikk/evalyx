@@ -11,21 +11,34 @@ from evalyx.db.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from evalyx.db.models.evaluation import EvaluationRun
+    from evalyx.db.models.organization import Organization
 
 
 class Application(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """An AI application or agent that Evalyx evaluates."""
+    """An AI application or agent that Evalyx evaluates.
+
+    Tenant-owned: every row belongs to exactly one organization (the Clerk
+    organization that created it). All queries are scoped by
+    ``organization_id`` at the repository boundary — a tenant can never
+    observe another tenant's applications.
+    """
 
     __tablename__ = "applications"
 
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
 
-    versions: Mapped[list["ApplicationVersion"]] = relationship(
+    organization: Mapped[Organization] = relationship()
+    versions: Mapped[list[ApplicationVersion]] = relationship(
         back_populates="application",
         cascade="all, delete-orphan",
     )
-    runs: Mapped[list["EvaluationRun"]] = relationship(back_populates="application")
+    runs: Mapped[list[EvaluationRun]] = relationship(back_populates="application")
 
 
 class ApplicationVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -52,4 +65,4 @@ class ApplicationVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: Non-secret configuration metadata (e.g. prompt template id, params).
     configuration: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
-    application: Mapped["Application"] = relationship(back_populates="versions")
+    application: Mapped[Application] = relationship(back_populates="versions")

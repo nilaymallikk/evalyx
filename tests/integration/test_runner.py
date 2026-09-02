@@ -22,6 +22,8 @@ from evalyx.llm.base import LLMProvider, LLMResponse, TokenUsage
 from evalyx.llm.errors import LLMRateLimitError, LLMTimeoutError
 from evalyx.db.session import DatabaseManager
 
+from tenant_helpers import integration_organization_id
+
 pytestmark = pytest.mark.integration
 
 #: All Evalyx domain tables, children first (mirrors tests/integration/conftest.py).
@@ -99,15 +101,30 @@ async def seed(
     snapshot: dict | None = None,
     with_expected: bool = False,
 ):
-    """Create application + dataset (+ versions) + a pending run."""
+    """Create application + dataset (+ versions) + a pending run.
+
+    Everything is created under one organization (Clerk is not involved at
+    the repository layer; multi-tenant behavior has its own suite).
+    """
     async with db_manager.session() as session:
+        from evalyx.db.tenancy import require_organization as resolve_row
+
         apps, datasets, evaluations = (
             ApplicationRepository(),
             DatasetRepository(),
             EvaluationRepository(),
         )
-        app = await apps.create(session, name=f"app-{uuid.uuid4().hex[:8]}")
-        dataset = await datasets.create(session, name=f"dataset-{uuid.uuid4().hex[:8]}")
+        organization = await resolve_row(session, f"org-{uuid.uuid4().hex[:8]}")
+        app = await apps.create(
+            session,
+            organization_id=organization.id,
+            name=f"app-{uuid.uuid4().hex[:8]}",
+        )
+        dataset = await datasets.create(
+            session,
+            organization_id=organization.id,
+            name=f"dataset-{uuid.uuid4().hex[:8]}",
+        )
         version = await datasets.create_version(
             session, dataset_id=dataset.id, version=run_version
         )
@@ -131,6 +148,7 @@ async def seed(
                 )
         run = await evaluations.create_run(
             session,
+            organization_id=organization.id,
             application_id=app.id,
             dataset_version_id=version.id,
             agent_model=agent_model,
@@ -186,10 +204,13 @@ async def test_run_convenience_creates_and_executes(clean_db):
     app_id, _, version_id, case_ids = await seed(clean_db, case_inputs=["only case"])
     provider = FakeProvider()
     runner = EvaluationRunner(provider, clean_db.session_factory)
+    async with clean_db.session() as session:
+        org = await integration_organization_id(session)
 
     # A fresh run created through the public run() API (new run, same pinned
     # dataset version as the seeded pending one — only the new run executes).
     summary = await runner.run(
+        organization_id=org,
         application_id=app_id,
         dataset_version_id=version_id,
         agent_model="agent-model:free",
@@ -226,7 +247,10 @@ async def test_input_mapping_reaches_the_provider(clean_db):
 async def test_context_included_and_expected_output_excluded(clean_db):
     async with clean_db.session() as session:
         datasets = DatasetRepository()
-        dataset = await datasets.create(session, name=f"ctx-{uuid.uuid4().hex[:8]}")
+        org = await integration_organization_id(session)
+        dataset = await datasets.create(
+            session, organization_id=org, name=f"ctx-{uuid.uuid4().hex[:8]}"
+        )
         version = await datasets.create_version(session, dataset_id=dataset.id, version=1)
         await datasets.add_test_case(
             session,
@@ -242,10 +266,11 @@ async def test_context_included_and_expected_output_excluded(clean_db):
     runner = EvaluationRunner(provider, clean_db.session_factory)
     async with clean_db.session() as session:
         app = await ApplicationRepository().create(
-            session, name=f"ctx-app-{uuid.uuid4().hex[:8]}"
+            session, organization_id=org, name=f"ctx-app-{uuid.uuid4().hex[:8]}"
         )
         run = await EvaluationRepository().create_run(
             session,
+            organization_id=org,
             application_id=app.id,
             dataset_version_id=version_id,
             agent_model="agent-model:free",

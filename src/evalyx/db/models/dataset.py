@@ -5,6 +5,7 @@ immutable test-case snapshots that evaluation runs actually execute against.
 """
 
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
@@ -12,16 +13,29 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from evalyx.db.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
+if TYPE_CHECKING:
+    from evalyx.db.models.organization import Organization
+
 
 class Dataset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """A logical collection of evaluation test cases."""
+    """A logical collection of evaluation test cases.
+
+    Tenant-owned: scoped by ``organization_id`` at the repository boundary
+    (see :class:`evalyx.db.models.application.Application`).
+    """
 
     __tablename__ = "datasets"
 
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
 
-    versions: Mapped[list["DatasetVersion"]] = relationship(
+    organization: Mapped[Organization] = relationship()
+    versions: Mapped[list[DatasetVersion]] = relationship(
         back_populates="dataset",
         cascade="all, delete-orphan",
     )
@@ -50,8 +64,8 @@ class DatasetVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
 
-    dataset: Mapped["Dataset"] = relationship(back_populates="versions")
-    test_cases: Mapped[list["TestCase"]] = relationship(
+    dataset: Mapped[Dataset] = relationship(back_populates="versions")
+    test_cases: Mapped[list[TestCase]] = relationship(
         back_populates="dataset_version",
         cascade="all, delete-orphan",
     )
@@ -81,4 +95,4 @@ class TestCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: ``metadata`` is reserved by SQLAlchemy, hence the trailing underscore.
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
 
-    dataset_version: Mapped["DatasetVersion"] = relationship(back_populates="test_cases")
+    dataset_version: Mapped[DatasetVersion] = relationship(back_populates="test_cases")

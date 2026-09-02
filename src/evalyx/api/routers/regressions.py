@@ -10,13 +10,23 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from evalyx.api.dependencies import get_regression_service
+from evalyx.api.auth import AuthContext
+from evalyx.api.dependencies import (
+    get_regression_service,
+    get_session,
+    require_organization,
+)
 from evalyx.api.schemas.regressions import RegressionCompareRequest
+from evalyx.db.models import Organization
 from evalyx.evaluation.regression.models import RegressionReport
 from evalyx.evaluation.regression.service import RegressionService
 
 router = APIRouter(prefix="/regressions", tags=["regressions"])
+
+#: Authenticated + tenant-resolved dependency (Clerk org → local workspace).
+TenantContext = Annotated[tuple[AuthContext, Organization], Depends(require_organization)]
 
 
 @router.post(
@@ -38,10 +48,16 @@ router = APIRouter(prefix="/regressions", tags=["regressions"])
 )
 async def compare_runs(
     payload: RegressionCompareRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
     service: Annotated[RegressionService, Depends(get_regression_service)],
+    context: TenantContext,
 ) -> RegressionReport:
+    _auth, organization = context
     return await service.compare_runs(
-        payload.baseline_run_id, payload.current_run_id, payload.thresholds
+        payload.baseline_run_id,
+        payload.current_run_id,
+        payload.thresholds,
+        organization_id=organization.id,
     )
 
 
@@ -53,6 +69,9 @@ async def compare_runs(
 )
 async def get_regression(
     comparison_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
     service: Annotated[RegressionService, Depends(get_regression_service)],
+    context: TenantContext,
 ) -> RegressionReport:
-    return await service.get_report(comparison_id)
+    _auth, organization = context
+    return await service.get_report(comparison_id, organization_id=organization.id)
