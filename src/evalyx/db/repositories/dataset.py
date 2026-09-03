@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalyx.db.models import Dataset, DatasetVersion, TestCase
@@ -43,6 +43,33 @@ class DatasetRepository:
             select(Dataset).filter_by(id=dataset_id, organization_id=organization_id)
         )
         return result.first()
+
+    async def list_in_organization(
+        self,
+        session: AsyncSession,
+        *,
+        organization_id: uuid.UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[Dataset], int]:
+        """Tenant-scoped dataset listing (creation order) with total count.
+
+        Phase 16: the CLI's ``evalyx dataset list`` needs the same paginated
+        surface applications already expose.
+        """
+        total = await session.scalar(
+            select(func.count())
+            .select_from(Dataset)
+            .where(Dataset.organization_id == organization_id)
+        )
+        result = await session.scalars(
+            select(Dataset)
+            .filter_by(organization_id=organization_id)
+            .order_by(Dataset.created_at.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(result.all()), int(total or 0)
 
     async def get_by_name(
         self, session: AsyncSession, *, organization_id: uuid.UUID, name: str

@@ -13,6 +13,7 @@ per the authentication behavior contract. Identity is *never* read from
 request body/query fields.
 """
 
+import re
 import typing
 from collections.abc import AsyncIterator
 from typing import Annotated
@@ -27,6 +28,10 @@ from evalyx.api.auth import (
     OrganizationRoleError,
     TokenVerifier,
 )
+
+#: The dev-mode organization header (only honored when AUTH_REQUIRED=0).
+_DEV_ORG_HEADER = "x-dev-organization-id"
+_DEV_ORG_PATTERN = re.compile(r"^org_[A-Za-z0-9]{1,64}$")
 from evalyx.api.schemas.common import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from evalyx.api.services import EvaluationService
 from evalyx.core.config import Settings
@@ -46,9 +51,50 @@ def get_database(request: Request) -> DatabaseManager:
     return request.app.state.database
 
 
+class DevOrganizationContext:
+    """Local-development-only organization context (AUTH_REQUIRED=0).
+
+    Production never constructs this object. Its ``verify`` honors the
+    bounded ``X-Dev-Organization-Id`` header so a CLI can exercise the real
+    REST surface (identity flows in the Authorization header position, never
+    from body/query data) without any Clerk dependency in the client.
+    """
+
+    _HEADER = "X-Dev-Organization-Id"
+    _PATTERN = _DEV_ORG_PATTERN
+
+    async def verify(self, request: Request) -> AuthContext:
+        # Lowercase lookup: Starlette headers are case-insensitive either
+        # way, and this also works against plain dict headers in tests.
+        raw = (request.headers.get(self._HEADER.lower()) or "").strip()
+        if self._PATTERN.fullmatch(raw):
+            return AuthContext(
+                clerk_user_id="dev-cli",
+                clerk_organization_id=raw,
+                organization_role=OrganizationRole.ADMIN,
+            )
+        return AuthContext(
+            clerk_user_id="dev-anonymous",
+            clerk_organization_id=None,
+            organization_role=None,
+        )
+
+
+dev_verifier: TokenVerifier = DevOrganizationContext()
+
+
 def get_token_verifier(request: Request) -> TokenVerifier:
-    """The Clerk token verifier wired at startup (``app.state``)."""
-    return request.app.state.token_verifier
+    """The Clerk token verifier wired at startup (``app.state``).
+
+    With ``AUTH_REQUIRED=0`` the verifier is the dev-mode context: it
+    accepts the bounded ``X-Dev-Organization-Id`` header so CLI/TUI clients
+    exercise the real API contract locally. Never active in production
+    (``_validate_production_safety`` forbids disabling auth there).
+    """
+    verifier = request.app.state.token_verifier
+    if type(verifier).__name__ == "NoopTokenVerifier":
+        return dev_verifier
+    return verifier
 
 
 async def get_auth_context(

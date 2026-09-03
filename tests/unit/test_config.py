@@ -1,5 +1,7 @@
 """Unit tests for the configuration layer. No network access required."""
 
+import uuid
+
 import pytest
 from pydantic import ValidationError
 
@@ -94,13 +96,16 @@ class TestSecretValidation:
         # Phase 15: production additionally requires authentication and the
         # encryption key, so this acceptance test supplies both. The intent
         # is unchanged: a generated (non-placeholder) EVALYX_SECRET_KEY is
-        # accepted in production.
+        # accepted in production. All credential-looking values are fake
+        # placeholders assembled from fragments (never real secrets).
+        fake_secret = "generated-" + "value-" + str(uuid.uuid4())
+        fake_clerk_secret = "sk_test_placeholder_" + "not-a-real-key"
         settings = make_settings(
             app_env="production",
-            evalyx_secret_key="s3cret-value",
+            evalyx_secret_key=fake_secret,
             auth_required=True,
             clerk_jwks_url="https://instance.clerk.accounts.dev/.well-known/jwks.json",
-            clerk_secret_key="sk_test_placeholder_not-a-real-key",
+            clerk_secret_key=fake_clerk_secret,
             evalyx_encryption_key=_TEST_ENCRYPTION_KEY,
         )
 

@@ -46,7 +46,7 @@ REGRESSION DETECTED
                 [hallucination, instruction_following]
 ```
 
-## Status: Phase 15 complete — generic HTTP application connections (Phases 1–14 built)
+## Status: Phase 16 complete — CLI + terminal UI (Phases 1–15 built)
 
 ### Currently implemented
 
@@ -111,6 +111,107 @@ Then pick a path:
   Swagger UI and the [endpoint table](#rest-api-phase-9).
 - **Understand the design**: read [Architecture](#architecture) below, then
   the phase sections (each phase documents its own guarantees).
+
+## CLI & terminal UI (Phase 16)
+
+Evalyx ships a developer-facing command-line interface (`evalyx`) and an
+interactive terminal UI. The CLI/TUI is a **client only**: it talks to the
+Evalyx REST API over HTTP and never touches PostgreSQL, Redis, Celery, or
+application endpoints directly. The backend stays authoritative for
+authentication, authorization, evaluation, and secrets.
+
+```text
+evalyx CLI/TUI ──HTTPS/REST──► Evalyx API (Clerk auth, tenancy) ──► PostgreSQL
+```
+
+### Installation & entrypoint
+
+```bash
+uv sync          # installs the evalyx package + console script
+evalyx --help
+evalyx --version
+```
+
+Run `evalyx` with **no command** to launch the interactive TUI (Textual):
+a sidebar (Dashboard / Applications / Datasets / Evaluations / Regressions),
+keyboard navigation (`q` quit, `r` refresh, `enter` inspect, `esc` back,
+`t` test connection), and loading/error states driven entirely by REST
+responses. The TUI renders no secrets and never blocks on network I/O.
+
+### Authentication
+
+```bash
+evalyx login        # verify + store the API credential (keyring when
+                    # available; otherwise ~/.config/evalyx/credentials.json, 0600)
+evalyx whoami       # user, organization, role, API URL
+evalyx logout       # remove the stored credential
+```
+
+- **Production (Clerk, `AUTH_REQUIRED=1`):** pass the Clerk session token
+  when prompted or via stdin (`echo "$TOKEN" | evalyx login`) — tokens are
+  never accepted as required argv values, never displayed, never logged.
+- **Local development (`AUTH_REQUIRED=0`):** `evalyx login --org org_dev_default`
+  stores the organization preference; requests carry the bounded
+  `X-Dev-Organization-Id` header, which production backends ignore entirely.
+- The local config file `~/.config/evalyx/config.toml` holds **non-secret**
+  preferences only (api_url, org, timeouts). Clerk secret keys, Evalyx
+  encryption keys, and application credentials are never stored client-side.
+
+### Configuration precedence
+
+CLI flag > environment variable (`EVALYX_API_URL`, `EVALYX_ORG`,
+`EVALYX_TIMEOUT`) > config file > default (`http://127.0.0.1:8000`).
+
+### Commands
+
+```bash
+evalyx app list [--json]                # applications
+evalyx app create [name]                # interactive when no name given
+evalyx app show <id>                    # metadata + versions (never secrets)
+evalyx app update <id> --name ...
+evalyx app delete <id>                  # requires --yes when non-interactive
+evalyx app version <id> <label> --endpoint https://... --auth bearer
+evalyx app secret <id>                  # rotate credential (prompted, hidden)
+evalyx app test <id> [--json]           # connection test (status, latency,
+                                        # bounded preview, failure category)
+
+evalyx dataset list [--json]            # datasets
+evalyx dataset create [name]
+evalyx dataset show <id>                # dataset + versions
+evalyx dataset add-case <id> <version> --name c1 --input '{"prompt":"hi"}'
+
+evalyx eval run --application <id> --dataset-version <id>        --agent-model <model> [--judge-model m] [--wait]
+evalyx eval list / eval show <run-id> / eval results <run-id> [--failures-only]
+evalyx eval guardrails <run-id>
+evalyx eval reliability <run-id>        # alias: evalyx reliability <run-id>
+
+evalyx regression run --baseline <run-id> --current <run-id>
+evalyx regression show <comparison-id>
+```
+
+### JSON mode & CI
+
+Every non-interactive command accepts `--json`: output is strictly valid
+JSON on stdout — no banners, progress, or ANSI sequences (progress lines go
+to stderr in human mode only). Terminal-only features are skipped when
+stdout is not a TTY.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | general failure |
+| 2 | usage/argument error |
+| 3 | authentication failure (run `evalyx login`) |
+| 4 | authorization failure |
+| 5 | resource not found |
+| 6 | connection/network failure |
+| 7 | evaluation completed with quality failures / regression detected |
+| 8 | evaluation execution errors |
+
+`evalyx eval run --wait --json` therefore composes safely in CI pipelines:
+exit `0` means the run completed with no quality failures.
 
 ## Architecture
 
@@ -682,10 +783,12 @@ Endpoint inventory:
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/applications` | register an application (201; duplicate name → 409) |
+| GET | `/api/v1/me` | caller identity + organizations (Phase 16, CLI auth) |
 | GET | `/api/v1/applications/{id}` | retrieve an application |
 | GET | `/api/v1/applications/{id}/versions` | list immutable versions |
 | POST | `/api/v1/applications/{id}/versions` | create a version (409 on duplicate label) |
 | POST | `/api/v1/datasets` | create a dataset |
+| GET | `/api/v1/datasets` | list datasets (paginated, Phase 16) |
 | GET | `/api/v1/datasets/{id}` | retrieve a dataset |
 | GET | `/api/v1/datasets/{id}/versions` | list versions (ordered by version) |
 | POST | `/api/v1/datasets/{id}/versions` | create an immutable version |

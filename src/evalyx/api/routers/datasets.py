@@ -94,6 +94,35 @@ async def create_dataset(
 
 
 @router.get(
+    "",
+    response_model=Page[DatasetResponse],
+    summary="List datasets",
+    description=(
+        "Datasets scoped to the authenticated organization, ordered by "
+        "creation time ascending (Phase 16: paginated listing for the CLI)."
+    ),
+)
+async def list_datasets(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    pagination: Annotated[tuple[int, int], Depends(pagination_params)],
+    context: TenantContext,
+) -> Page[DatasetResponse]:
+    limit, offset = pagination
+    _auth, organization = context
+    datasets, total = await _repository().list_in_organization(
+        session, organization_id=organization.id, limit=limit, offset=offset
+    )
+    return Page[DatasetResponse](
+        items=[
+            DatasetResponse.model_validate(dataset) for dataset in datasets
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
     "/{dataset_id}",
     response_model=DatasetResponse,
     summary="Retrieve a dataset",

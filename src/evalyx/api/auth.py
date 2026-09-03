@@ -63,7 +63,7 @@ class AuthContext:
 
     @property
     def is_authenticated(self) -> bool:
-        return bool(self.clerk_user_id)
+        return bool(self.clerk_user_id) and self.clerk_user_id != "dev-anonymous"
 
     @property
     def is_admin(self) -> bool:
@@ -124,6 +124,11 @@ class ClerkTokenVerifier:
             or None,
             secret_key=secret_key_value,
         )
+
+    @property
+    def clerk(self) -> Clerk:
+        """The underlying SDK client (display-info lookups in ``/me`` only)."""
+        return self._clerk
 
     async def verify(self, request: Request) -> AuthContext:
         # Starlette requests satisfy the SDK's Requestish protocol
