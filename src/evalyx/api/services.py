@@ -149,6 +149,28 @@ class EvaluationService:
                     f"exist for application {request.application_id}."
                 )
 
+        # Phase 15: generic (connection_type="http") applications must have
+        # a resolvable, connection-carrying version — otherwise the run
+        # would fail case-by-case at execution time. Rejected up front with
+        # the uniform 404 (never leaking another tenant's state).
+        if application.connection_type == "http":
+            if request.application_version_id is not None:
+                if version is None or not isinstance(version.connection, dict):
+                    raise NotFoundError(
+                        f"Application version {request.application_version_id} "
+                        "has no connection configuration."
+                    )
+            elif (
+                await self._applications.latest_version_with_connection(
+                    session, application.id
+                )
+                is None
+            ):
+                raise NotFoundError(
+                    f"Application {application.id} has no version with a "
+                    "connection configuration."
+                )
+
         dataset_version = await self._datasets.get_version_in_organization(
             session, request.dataset_version_id, organization_id=organization_id
         )

@@ -49,8 +49,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from evalyx.application.base import (
     ApplicationTarget,
     application_name_from_model,
-    create_application_target,
 )
+from evalyx.application.resolve import resolve_application_target
 from evalyx.core.config import Settings
 from evalyx.db.models import RunStatus
 from evalyx.db.repositories import EvaluationRepository
@@ -205,11 +205,17 @@ async def execute_evaluation(
         # The judge provider is always an Evalyx-side LLM provider (semantic
         # guardrails judge outputs themselves). The run's ``agent_model``
         # selector decides only the *execution* target: a raw model via the
-        # provider, or an external application under test.
+        # provider, or an external application under test — resolved from
+        # the database (Phase 15): connection_type "http" builds a generic
+        # HTTP target from the version's connection configuration (with the
+        # credential decrypted here, at the execution boundary), and the
+        # legacy registry still serves the mlgpt reference target.
         provider = provider_factory(settings)
         application_name = application_name_from_model(agent_model)
         application_target = (
-            create_application_target(application_name, settings)
+            await resolve_application_target(
+                db.session_factory, run_id=run_id, settings=settings
+            )
             if application_name is not None
             else None
         )

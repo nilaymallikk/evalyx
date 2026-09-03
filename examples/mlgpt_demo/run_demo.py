@@ -189,7 +189,7 @@ def ensure_application(state: dict) -> str:
         if code == 200:
             return body["id"]
         print("    (stored application no longer exists — re-creating)")
-    code, body = api("POST", "/applications", {"name": APPLICATION_NAME})
+    code, body = api("POST", "/applications", {"name": APPLICATION_NAME, "connection_type": "mlgpt"})
     if code == 409:  # created by an earlier run whose state file was lost
         raise ApiError(
             f"An application named {APPLICATION_NAME!r} already exists but is "

@@ -10,6 +10,9 @@ os.environ.setdefault("EVALYX_SECRET_KEY", "test-only-secret-key")
 # Hermetic suite: no Clerk. Tenant-scoped API tests inject a fake verifier;
 # everything else constructs Settings freely.
 os.environ.setdefault("AUTH_REQUIRED", "0")
+# Valid test encryption key so Settings constructs everywhere (the key is a
+# generated fixture value, never a real credential).
+os.environ.setdefault("EVALYX_ENCRYPTION_KEY", "CZWNnvRiuKkYgjlplxwPzBYz1hQYgo72d8M29i22800=")
 
 
 def pytest_collection_modifyitems(config, items):

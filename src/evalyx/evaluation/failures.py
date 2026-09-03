@@ -169,12 +169,23 @@ def classify_application_error(
 ) -> ExecutionFailure:
     """Classify an application-boundary failure.
 
-    Only what is observable at the application boundary is recorded. The
-    exception's message is safe by contract (status code and error kind
-    only — never bodies), and the classification derives from the status
-    code embedded there.
+    Newer connectors (Phase 15 generic HTTP target) carry a typed
+    ``category`` — used directly when it is a valid taxonomy value. Legacy
+    messages (the MLGPT reference target) are classified by parsing the
+    status code embedded there, exactly as before. Only what is observable
+    at the application boundary is recorded; the exception's message is
+    safe by contract (status code and error kind only — never bodies).
     """
     message = str(exc)
+    typed = _typed_category(exc.category)
+    if typed is not None:
+        return ExecutionFailure(
+            category=typed,
+            reason=_typed_reason(typed, message),
+            retryable=_retryable_for(typed),
+            http_status=_extract_status(message),
+            attempts=exc.attempts if attempts is None else attempts,
+        )
     http_status = _extract_status(message)
     category = _application_category(message, http_status)
     return ExecutionFailure(
@@ -184,6 +195,26 @@ def classify_application_error(
         http_status=http_status,
         attempts=exc.attempts if attempts is None else attempts,
     )
+
+
+def _typed_category(category: str | None) -> FailureCategory | None:
+    """Map a connector-supplied category string to the taxonomy (or None)."""
+    if category is None:
+        return None
+    try:
+        return FailureCategory(category)
+    except ValueError:
+        return None
+
+
+def _typed_reason(category: FailureCategory, message: str) -> str:
+    """Template reasons for typed categories, falling back to the legacy
+    templates; the exception message itself is never used as the reason."""
+    if category is FailureCategory.AUTHENTICATION:
+        return "Application under test rejected the configured credentials."
+    if category is FailureCategory.MALFORMED_RESPONSE:
+        return "Application under test returned a malformed (non-JSON) response."
+    return _application_reason(category, message)
 
 
 def _extract_status(message: str) -> int | None:

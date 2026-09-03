@@ -17,6 +17,8 @@ from typing import Literal
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from evalyx.core.encryption import decode_encryption_key
+
 Environment = Literal["development", "test", "production"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -75,6 +77,12 @@ class Settings(BaseSettings):
     #: disabled in local development when Clerk is not configured.
     auth_required: bool = True
 
+    # Application credential encryption (Phase 15). urlsafe base64 of a
+    # 32-byte AES-GCM key (python -c "import secrets, os; \
+    # print(secrets.token_urlsafe(32))"). Required in production; optional
+    # in development until a secret is actually stored.
+    evalyx_encryption_key: SecretStr = SecretStr("")
+
     # Security
     evalyx_secret_key: SecretStr = SecretStr("")
 
@@ -131,6 +139,37 @@ class Settings(BaseSettings):
                 "EVALYX_SECRET_KEY must be replaced with a real generated secret "
                 "when APP_ENV=production."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_production_safety(self) -> Settings:
+        """Production may never run with authentication or encryption off."""
+        if self.app_env == "production" and not self.auth_required:
+            raise ValueError(
+                "AUTH_REQUIRED cannot be disabled when APP_ENV=production. "
+                "Every deployment must authenticate requests."
+            )
+        if self.app_env == "production" and self.evalyx_encryption_key.get_secret_value().strip() == "":
+            raise ValueError(
+                "EVALYX_ENCRYPTION_KEY must be set when APP_ENV=production "
+                "(application credentials are encrypted at rest)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_encryption_key(self) -> Settings:
+        """Fail fast on a malformed encryption key (never echo the value)."""
+        key_value = self.evalyx_encryption_key.get_secret_value().strip()
+        if key_value == "":
+            return self  # optional outside production (see _validate_production_safety)
+        try:
+            decode_encryption_key(key_value)
+        except ValueError:
+            raise ValueError(
+                "EVALYX_ENCRYPTION_KEY must be a urlsafe base64-encoded "
+                "32-byte key. Generate one with: python -c "
+                "\"import secrets; print(secrets.token_urlsafe(32))\""
+            ) from None
         return self
 
     @model_validator(mode="after")

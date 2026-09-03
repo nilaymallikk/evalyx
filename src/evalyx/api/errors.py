@@ -38,7 +38,9 @@ from evalyx.api.auth import (
     OrganizationRoleError,
 )
 from evalyx.api.middleware import SCOPE_REQUEST_ID_KEY
+from evalyx.application.connection import ConnectionConfigError
 from evalyx.core.context import get_request_id
+from evalyx.core.encryption import EncryptionError
 from evalyx.db.repositories import DuplicateVersionError, NotFoundError
 from evalyx.evaluation.regression.service import RegressionValidationError
 
@@ -70,6 +72,19 @@ class EvaluationSubmissionError(Exception):
         super().__init__(message)
         self.run_id = run_id
         self.code = "evaluation_enqueue_failed"
+
+
+class ConnectionNotReadyError(Exception):
+    """An application connection cannot be exercised yet (409).
+
+    A configuration *state* problem — e.g. the connection's auth mode
+    requires a credential but none has been stored — distinct from a
+    missing resource (404). Safe by construction: message names the state.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "connection_not_ready"
 
 
 def _error_response(
@@ -164,6 +179,35 @@ def register_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         return _error_response(
             status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, str(exc)
+        )
+
+    @app.exception_handler(ConnectionNotReadyError)
+    async def _handle_connection_not_ready(
+        _: Request, exc: ConnectionNotReadyError
+    ) -> JSONResponse:
+        return _error_response(status.HTTP_409_CONFLICT, exc.code, str(exc))
+
+    @app.exception_handler(ConnectionConfigError)
+    async def _handle_connection_config(
+        _: Request, exc: ConnectionConfigError
+    ) -> JSONResponse:
+        # Rule-name message only — never the request payload (which could
+        # contain a secret).
+        return _error_response(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid_connection", str(exc)
+        )
+
+    @app.exception_handler(EncryptionError)
+    async def _handle_encryption(
+        _: Request, exc: EncryptionError
+    ) -> JSONResponse:
+        # Secret encryption is unavailable (unset/misconfigured key): a
+        # server-side configuration problem, never key material.
+        logger.error("secret_encryption_unavailable", error=type(exc).__name__)
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "encryption_unavailable",
+            "Secret encryption is unavailable; check EVALYX_ENCRYPTION_KEY configuration.",
         )
 
     @app.exception_handler(Exception)

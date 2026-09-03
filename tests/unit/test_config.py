@@ -36,6 +36,9 @@ def clean_environment(monkeypatch):
 #: these tests assert masking behavior, not secret values.
 _PLACEHOLDER_SECRET = "placeholder-" + "settings-secret"
 
+#: A valid urlsafe base64-encoded 32-byte key (generated once for tests).
+_TEST_ENCRYPTION_KEY = "CZWNnvRiuKkYgjlplxwPzBYz1hQYgo72d8M29i22800="
+
 
 def make_settings(**overrides) -> Settings:
     """Build Settings without reading the developer's local .env file."""
@@ -88,9 +91,52 @@ class TestSecretValidation:
             make_settings(app_env="production", evalyx_secret_key="change-me")
 
     def test_generated_secret_accepted_in_production(self):
-        settings = make_settings(app_env="production", evalyx_secret_key="s3cret-value")
+        # Phase 15: production additionally requires authentication and the
+        # encryption key, so this acceptance test supplies both. The intent
+        # is unchanged: a generated (non-placeholder) EVALYX_SECRET_KEY is
+        # accepted in production.
+        settings = make_settings(
+            app_env="production",
+            evalyx_secret_key="s3cret-value",
+            auth_required=True,
+            clerk_jwks_url="https://instance.clerk.accounts.dev/.well-known/jwks.json",
+            clerk_secret_key="sk_test_placeholder_not-a-real-key",
+            evalyx_encryption_key=_TEST_ENCRYPTION_KEY,
+        )
 
         assert settings.app_env == "production"
+
+
+class TestProductionAuthHardening:
+    """Phase 15 Step 25: production cannot run with authentication off."""
+
+    def test_production_auth_required_zero_fails(self):
+        with pytest.raises(ValueError, match="AUTH_REQUIRED"):
+            make_settings(app_env="production", auth_required=False)
+
+    def test_development_auth_required_zero_allowed(self):
+        settings = make_settings(app_env="development", auth_required=False)
+        assert settings.auth_required is False
+
+    def test_production_requires_encryption_key(self):
+        with pytest.raises(ValueError, match="EVALYX_ENCRYPTION_KEY"):
+            make_settings(
+                app_env="production",
+                auth_required=True,
+                clerk_jwks_url="https://instance.clerk.accounts.dev/.well-known/jwks.json",
+                clerk_secret_key=_PLACEHOLDER_SECRET,
+                evalyx_encryption_key="",  # explicitly unset (env may provide one)
+            )
+
+    def test_malformed_encryption_key_fails_without_echo(self):
+        with pytest.raises(ValueError, match="EVALYX_ENCRYPTION_KEY"):
+            make_settings(evalyx_encryption_key="not-a-valid-key!!")
+
+    def test_valid_encryption_key_accepted(self):
+        settings = make_settings(evalyx_encryption_key=_TEST_ENCRYPTION_KEY)
+        assert (
+            settings.evalyx_encryption_key.get_secret_value() == _TEST_ENCRYPTION_KEY
+        )
 
 
 class TestSecretMasking:

@@ -46,7 +46,7 @@ REGRESSION DETECTED
                 [hallucination, instruction_following]
 ```
 
-## Status: Phase 14 complete — Clerk authentication & multi-tenancy (Phases 1–13 built)
+## Status: Phase 15 complete — generic HTTP application connections (Phases 1–14 built)
 
 ### Currently implemented
 
@@ -64,6 +64,7 @@ REGRESSION DETECTED
 - Regression detection & baseline comparison (`src/evalyx/evaluation/regression/`) — deterministic, LLM-free comparison of two completed runs (baseline vs current): pass/failure/error rates, per-guardrail failure rates, latency, case-level transitions, and typed threshold policy producing persisted, idempotent `RegressionComparison` artifacts
 - REST API (`src/evalyx/api/`) — versioned FastAPI surface under `/api/v1` for applications, dataset/version management, test cases, asynchronous evaluation submission (Celery), run/case/guardrail inspection, and regression comparisons; centralized error mapping, pagination, typed request/response schemas, OpenAPI/Swagger UI
 - Application-under-test integration (`src/evalyx/application/`) — evaluate external AI applications (not just raw model providers) over HTTP: typed `ApplicationTarget` protocol, secret-safe `HttpApplicationTarget` transport, a target registry, and a worker execution branch selected by the run's `application:<name>` model selector; the LLMProvider path is unchanged
+- Generic application connections (`src/evalyx/application/connection.py`, `generic_http.py`, `ssrf.py`, `resolve.py`) — Phase 15: users register **their own AI applications** (`connection_type="http"`), version immutable connection configurations (endpoint, method, request mapping, response extraction path, auth mode, timeouts/retries), rotate AES-GCM-encrypted credentials, and test connections through a safe endpoint. The worker resolves targets from the database via the *same* `ApplicationTarget` protocol — the evaluation engine never knows whether it is driving MLGPT, a generic HTTP app, or a future connector.
 - MLGPT reference demo (`examples/mlgpt_demo/`) — end-to-end demonstration driving MLGPT (the reference RAG chatbot) through the REST API: idempotent setup, baseline run, controlled reversible behavior change, second run, and a Phase 8 regression comparison
 - Failure analysis (`src/evalyx/evaluation/failures.py`) — Phase 12 reliability layer: deterministic classification of *execution* failures (the application could not answer) into a small typed taxonomy, persisted on the case result and exposed through the API. Quality failures (the application answered, but the answer was bad) remain the domain of guardrails/scoring and are never conflated with infrastructure errors
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
@@ -214,6 +215,109 @@ Key points:
 - **Future CLI/TUI.** `evalyx login` will obtain a Clerk session token and
   the CLI will simply attach it as a bearer header to the same REST API —
   no Evalyx database internals are exposed to clients.
+
+## Phase 15 — Generic application connections
+
+Evalyx now evaluates **any HTTP AI application**, not only MLGPT. A user
+registers their application, configures how Evalyx calls it (as immutable
+application versions), and runs the existing evaluation datasets against
+it. MLGPT remains a *reference application* — the same `ApplicationTarget`
+protocol drives it and the generic connector, and a future connector can
+slot in without touching the evaluation engine, guardrails, scoring,
+failure analysis, or regression system.
+
+### How an application connection works
+
+1. `POST /api/v1/applications` with `connection_type: "http"` registers a
+   generic application (optionally with a write-only `secret`).
+2. `POST /api/v1/applications/{id}/versions` stores a validated, immutable
+   **connection configuration**: endpoint, HTTP method, request mapping,
+   response extraction path, authentication mode, headers, timeout, and
+   retry count. The credential never lives on a version — it is encrypted
+   on the application row.
+3. `POST /api/v1/applications/{id}/test` makes one controlled request to
+   the **stored** endpoint (never an arbitrary URL from the request) and
+   returns a safe structured result (success, latency, HTTP status,
+   truncated answer preview).
+4. Submit evaluations exactly as before; the worker resolves the target
+   from the database at execution time.
+
+Connection configuration example:
+
+```json
+{
+  "endpoint": "https://your-app.example.com/v1/chat",
+  "method": "POST",
+  "auth": {"type": "bearer"},
+  "request": {"mode": "field", "input_field": "question"},
+  "response_path": "choices.0.message.content",
+  "timeout_seconds": 30,
+  "max_attempts": 3
+}
+```
+
+- **Request mapping**: two bounded modes — `field` (place the test-case
+  input into one JSON field) and `template` (a small JSON body template in
+  which string leaves may reference exactly one variable, `{{input}}`).
+  No executable templates.
+- **Response extraction**: a safe dotted-path extractor (`answer`,
+  `data.response`, `choices.0.message.content`). No JSONPath dependency.
+- **Authentication**: `none`, `bearer` (`Authorization: Bearer …`), or a
+  custom API-key header (`X-API-Key: …` or any permitted header name).
+  User headers may never override security-sensitive headers (`Host`,
+  `Content-Length`, `Connection`, `Transfer-Encoding`, `Authorization`, …).
+
+### Credential encryption
+
+- Secrets are encrypted at rest with **AES-256-GCM** (the `cryptography`
+  library) under a key supplied as `EVALYX_ENCRYPTION_KEY` (urlsafe base64
+  of 32 bytes). The database stores only a versioned envelope
+  (`v1:<nonce>:<ciphertext>`); plaintext never persists.
+- The key must be set when `APP_ENV=production` (startup failure
+  otherwise), must never be committed, and never appears in logs, API
+  responses, or exceptions.
+- Rotation: `PATCH /api/v1/applications/{id}/connection` replaces the
+  ciphertext with a newly encrypted value. The old secret is never
+  returned and never required. Responses expose only `secret_configured`.
+- The ciphertext format is versioned for future key rotation; rotating the
+  *master key* and re-encrypting existing envelopes is not implemented in
+  this phase (documented limitation).
+
+### SSRF and HTTP safety
+
+External endpoints are validated twice: at configuration time (scheme,
+credentials, fragments, literal private/loopback/link-local/metadata IPs
+are rejected) and at request time (the hostname is resolved via DNS and
+**every** resolved address must be public). Redirects are followed
+manually with a full re-validation of each hop, proxy environment
+variables are ignored, connections/reads have bounded timeouts, responses
+are capped at 2 MiB, and retries are bounded (connect errors, timeouts,
+502/503/504 only — never 4xx, never authentication, never extraction
+failures). Known limitation: the DNS check and the TCP connect are two
+separate steps (a TOCTOU window); fully closing it would require pinning
+connections to validated IPs at the transport layer (future work).
+
+### Tenant isolation and failure analysis
+
+- Every application/connection is strictly scoped to the authenticated
+  Clerk organization (Phase 14). Cross-tenant reads, writes, deletes,
+  tests, and evaluation submissions all behave as uniform 404s — no
+  existence leaks, no client-supplied tenant identity.
+- Generic application failures reuse the Phase 12 taxonomy: `timeout`,
+  `connection_error`, `application_http_error`, `rate_limited`,
+  `authentication`, `malformed_response`, `application_response_invalid`.
+  An execution failure (the app did not answer) is never counted as a
+  quality failure (the app answered badly).
+- `AUTH_REQUIRED=0` remains available for local development, but fails
+  startup when `APP_ENV=production`.
+
+### MLGPT's role
+
+MLGPT is the reference demo target (`connection_type="mlgpt"`, endpoint
+from `MLGPT_BASE_URL`). Existing applications default to `mlgpt` on
+migration, and the `examples/mlgpt_demo` workflow is unchanged. Nothing in
+Evalyx hardcodes MLGPT's internals — generic HTTP applications are first
+class, provider-agnostic, and independent of Evalyx's own LLM providers.
 
 ## Local development
 

@@ -32,6 +32,20 @@ class Application(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    #: How Evalyx invokes this application: ``"http"`` (generic user
+    #: application driven by its version's connection configuration) or
+    #: ``"mlgpt"`` (the Evalyx reference demo target; the historical default
+    #: so pre-Phase-15 rows and the demo keep working unchanged).
+    connection_type: Mapped[str] = mapped_column(
+        String(32), default="mlgpt", server_default="mlgpt", nullable=False
+    )
+    #: Encrypted application credential (Phase 15). The plaintext never
+    #: touches the database, logs, API responses, or task arguments — only
+    #: this AES-GCM envelope (see ``evalyx.core.encryption``), decrypted
+    #: solely at the execution boundary in the worker/test path.
+    encrypted_secret: Mapped[str | None] = mapped_column(Text)
+    #: Non-secret credential metadata (e.g. auth type, rotation timestamp).
+    secret_metadata: Mapped[dict | None] = mapped_column(JSONB)
 
     organization: Mapped[Organization] = relationship()
     versions: Mapped[list[ApplicationVersion]] = relationship(
@@ -64,5 +78,11 @@ class ApplicationVersion(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text)
     #: Non-secret configuration metadata (e.g. prompt template id, params).
     configuration: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    #: Immutable non-secret connection configuration (Phase 15, generic
+    #: ``connection_type="http"`` applications only): endpoint, method,
+    #: request mapping, response extraction path, auth mode, timeouts.
+    #: The credential itself is NOT here — it lives encrypted on the
+    #: application row. ``None`` for reference/legacy applications.
+    connection: Mapped[dict | None] = mapped_column(JSONB)
 
     application: Mapped[Application] = relationship(back_populates="versions")

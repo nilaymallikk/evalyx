@@ -47,18 +47,32 @@ class ApplicationInvocationError(Exception):
 
     Safe by construction: messages contain the HTTP status code and error
     *kind* only — never response bodies (which may echo prompts), headers,
-    or credentials. The evaluation runner records these as per-case errors
-    (like provider errors), so one failed invocation never kills a run.
+    URLs, or credentials. The evaluation runner records these as per-case
+    errors (like provider errors), so one failed invocation never kills a run.
 
     ``attempts`` records how many transport attempts (including the first)
     were made before giving up — set by transports that retry transient
     failures; ``None`` when no retry layer is involved. Used only as typed
     failure metadata; it never carries secrets.
+
+    ``category`` optionally carries the failure kind as a
+    :class:`evalyx.evaluation.failures.FailureCategory` *value* (plain
+    string — this module must not import the taxonomy, which imports this
+    one). Newer connectors set it; the classifier prefers it over its
+    legacy message parsing. ``None`` keeps the legacy behavior for the
+    MLGPT reference target.
     """
 
-    def __init__(self, message: str, *, attempts: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int | None = None,
+        category: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.attempts = attempts
+        self.category = category
 
 
 @runtime_checkable
