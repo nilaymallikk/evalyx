@@ -19,18 +19,31 @@ Mapping:
 - ``NotFoundError``                → 404 ``not_found``
 - ``DuplicateVersionError``        → 409 ``duplicate_version``
 - ``sqlalchemy IntegrityError``    → 409 ``conflict`` (e.g. duplicate name)
+- ``sqlalchemy OperationalError``  → 503 ``database_unavailable``
+- ``ConnectionError``              → 503 ``database_unavailable``
+- ``sqlalchemy TimeoutError``      → 503 ``database_unavailable`` (pool exhaustion)
+- bare ``OSError``                 → 503 ``database_unavailable`` only for
+  connectivity errnos, else 500 ``internal_error``
 - ``RegressionValidationError``    → 400 ``invalid_comparison``
 - ``EvaluationSubmissionError``    → 503 ``evaluation_enqueue_failed``
+- ``QuotaExceededError``           → 429 ``quota_exceeded``
 - request validation (FastAPI)     → 422 ``validation_error``
 - anything else                    → 500 ``internal_error``
 """
+import errno
 
 import structlog
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import (
+    IntegrityError,
+    OperationalError,
+)
+from sqlalchemy.exc import (
+    TimeoutError as SQLAlchemyTimeoutError,
+)
 
 from evalyx.api.auth import (
     AuthenticationError,
@@ -41,6 +54,7 @@ from evalyx.api.middleware import SCOPE_REQUEST_ID_KEY
 from evalyx.application.connection import ConnectionConfigError
 from evalyx.core.context import get_request_id
 from evalyx.core.encryption import EncryptionError
+from evalyx.core.metrics import metrics
 from evalyx.db.repositories import DuplicateVersionError, NotFoundError
 from evalyx.evaluation.regression.service import RegressionValidationError
 
@@ -99,6 +113,46 @@ class EvaluationValidationError(Exception):
         self.code = "evaluation_too_large"
 
 
+class QuotaExceededError(Exception):
+    """An organization quota admission check refused the operation (429).
+
+    Safe by construction: the message names the resource and the counts —
+    never payloads, secrets, or other tenants' usage.
+    """
+
+    def __init__(self, resource: str, message: str) -> None:
+        super().__init__(message)
+        self.resource = resource
+        self.code = "quota_exceeded"
+
+
+#: Errnos that unambiguously mean "could not reach the peer" (as opposed
+#: to local bugs like ENOENT/EACCES, which must stay 500s).
+_CONNECTIVITY_ERRNOS: frozenset[int | None] = frozenset(
+    {
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.ECONNABORTED,
+        errno.EHOSTUNREACH,
+        errno.ENETUNREACH,
+        errno.ETIMEDOUT,
+        errno.EPIPE,
+        errno.ENOTCONN,
+    }
+)
+
+
+def _is_connectivity_os_error(exc: OSError) -> bool:
+    """True when an OSError means unreachable peer (honest 503 territory)."""
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if exc.errno in _CONNECTIVITY_ERRNOS:
+        return True
+    # asyncio aggregates parallel connect failures into one bare OSError
+    # ("Multiple exceptions: ... Connect call failed ...") with errno None.
+    return "Connect call failed" in str(exc)
+
+
 def _error_response(
     status_code: int,
     code: str,
@@ -131,6 +185,11 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AuthenticationError)
     async def _handle_authentication(_: Request, exc: AuthenticationError) -> JSONResponse:
         # 401 with a kind-only message: no token contents, no Clerk details.
+        # Denials are observable via logs + bounded metric (no DB write: the
+        # caller is unauthenticated, so unauthenticated writes would be an
+        # abuse vector of their own).
+        logger.warning("auth_denied", reason="authentication_failed")
+        metrics.increment("auth_denied_total", {"reason": "authentication_failed"})
         return _error_response(
             status.HTTP_401_UNAUTHORIZED,
             "authentication_failed",
@@ -142,6 +201,8 @@ def register_error_handlers(app: FastAPI) -> None:
     async def _handle_organization_required(
         _: Request, exc: OrganizationRequiredError
     ) -> JSONResponse:
+        logger.warning("auth_denied", reason="organization_required")
+        metrics.increment("auth_denied_total", {"reason": "organization_required"})
         return _error_response(
             status.HTTP_403_FORBIDDEN, "organization_required", str(exc)
         )
@@ -150,6 +211,8 @@ def register_error_handlers(app: FastAPI) -> None:
     async def _handle_organization_role(
         _: Request, exc: OrganizationRoleError
     ) -> JSONResponse:
+        logger.warning("auth_denied", reason="insufficient_role")
+        metrics.increment("auth_denied_total", {"reason": "insufficient_role"})
         return _error_response(
             status.HTTP_403_FORBIDDEN, "insufficient_role", str(exc)
         )
@@ -176,6 +239,76 @@ def register_error_handlers(app: FastAPI) -> None:
             "conflict",
             "Resource conflict: the request violates a uniqueness constraint.",
         )
+
+    @app.exception_handler(OperationalError)
+    async def _handle_operational_error(_: Request, exc: OperationalError) -> JSONResponse:
+        # Database connectivity failure (outage, failover): a 503 with a
+        # stable code so operators and clients can distinguish "database
+        # down, retry later" from a real 500. Never connection details.
+        logger.error(
+            "database_unavailable", error=type(exc.orig).__name__ if exc.orig else None
+        )
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "database_unavailable",
+            "The database is temporarily unavailable; retry later.",
+        )
+
+    @app.exception_handler(ConnectionError)
+    async def _handle_connection_error(_: Request, exc: ConnectionError) -> JSONResponse:
+        # Transport-level connectivity failure (e.g. connection refused by
+        # PostgreSQL/Redis during pool checkout, which asyncpg surfaces as
+        # a bare OSError subclass rather than OperationalError). Same 503
+        # contract as above; never addresses or ports.
+        logger.error("database_unavailable", error=type(exc).__name__)
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "database_unavailable",
+            "The database is temporarily unavailable; retry later.",
+        )
+
+    @app.exception_handler(SQLAlchemyTimeoutError)
+    async def _handle_pool_timeout(_: Request, exc: SQLAlchemyTimeoutError) -> JSONResponse:
+        # Connection-pool exhaustion under load: same 503 contract.
+        logger.error("database_unavailable", error=type(exc).__name__)
+        return _error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "database_unavailable",
+            "The database is temporarily unavailable; retry later.",
+        )
+
+    @app.exception_handler(OSError)
+    async def _handle_os_error(request: Request, exc: OSError) -> JSONResponse:
+        # asyncio/asyncpg surface some connectivity failures (e.g. refused
+        # connections during pool checkout) as a bare OSError rather than
+        # OperationalError/ConnectionError, so those handler registrations
+        # miss by MRO. Discriminate precisely here: connection errnos (and
+        # asyncio's "Connect call failed" aggregate) map to the 503
+        # contract; every other OSError keeps the generic 500 envelope.
+        if _is_connectivity_os_error(exc):
+            logger.error("database_unavailable", error=type(exc).__name__)
+            return _error_response(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "database_unavailable",
+                "The database is temporarily unavailable; retry later.",
+            )
+        request_id = request.scope.get(SCOPE_REQUEST_ID_KEY) or get_request_id()
+        logger.error(
+            "unhandled_api_error",
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+            error=type(exc).__name__,
+            exc_info=True,  # noqa: LOG014 — traceback goes to logs, never to the response
+        )
+        response = _error_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "An unexpected internal error occurred.",
+        )
+        if request_id is not None:
+            response.headers["X-Request-ID"] = request_id
+        return response
 
     @app.exception_handler(RegressionValidationError)
     async def _handle_regression_validation(
@@ -205,6 +338,18 @@ def register_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         return _error_response(
             status.HTTP_422_UNPROCESSABLE_ENTITY, exc.code, str(exc)
+        )
+
+    @app.exception_handler(QuotaExceededError)
+    async def _handle_quota_exceeded(
+        _: Request, exc: QuotaExceededError
+    ) -> JSONResponse:
+        logger.warning("quota_exceeded", resource=exc.resource)
+        return _error_response(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            exc.code,
+            str(exc),
+            headers={"Retry-After": "60"},
         )
 
     @app.exception_handler(ConnectionConfigError)

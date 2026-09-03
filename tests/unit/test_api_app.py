@@ -45,7 +45,12 @@ def build_client() -> TestClient:
     tests exercise validation/error mapping, not Clerk (dedicated suite:
     tests/unit/test_auth_api.py).
     """
-    app = create_app(Settings(auth_required=False))
+    from evalyx.api.ratelimit import InMemoryRateLimitBackend
+
+    app = create_app(
+        Settings(auth_required=False),
+        rate_limit_backend=InMemoryRateLimitBackend(),
+    )
     fake_context = (
         AuthContext(
             clerk_user_id="unit-test-user",
@@ -215,7 +220,7 @@ class FakeEvaluationService:
         self.submitted: list = []
         self._fail_enqueue = fail_enqueue
 
-    async def submit(self, request, *, organization_id):
+    async def submit(self, request, *, organization_id, clerk_user_id="test-user"):
         self.submitted.append((request, organization_id))
         if self._fail_enqueue:
             raise EvaluationSubmissionError(

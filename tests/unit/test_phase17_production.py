@@ -26,7 +26,11 @@ from evalyx.api.app import create_app
 from evalyx.api.auth import AuthContext, OrganizationRole
 from evalyx.api.dependencies import require_organization
 from evalyx.api.errors import EvaluationValidationError
-from evalyx.api.ratelimit import RateLimiter, _bucket_for
+from evalyx.api.ratelimit import (
+    InMemoryRateLimitBackend,
+    RateLimiter,
+    _bucket_for,
+)
 from evalyx.core.config import Settings
 from evalyx.core.logging import _redact_sensitive
 from evalyx.core.metrics import MetricsRegistry
@@ -80,7 +84,9 @@ def build_client(settings: Settings | None = None) -> TestClient:
     from evalyx.api.dependencies import require_authenticated_user
 
     settings = settings or make_settings()
-    app = create_app(settings)
+    # Explicit in-memory backend: hermetic tests never touch real Redis
+    # (production always uses the Redis backend via app.state.redis).
+    app = create_app(settings, rate_limit_backend=InMemoryRateLimitBackend())
     fake_auth = AuthContext(
         clerk_user_id="prod-test-user",
         clerk_organization_id="org_prod_test",
@@ -167,23 +173,26 @@ class TestRateLimitBuckets:
         assert _bucket_for("/api/v1/evaluations", "GET") == "default"
         assert _bucket_for("/api/v1/datasets", "GET") == "default"
 
-    def test_fixed_window_blocks_over_limit(self):
+    async def test_fixed_window_blocks_over_limit(self):
         settings = make_settings(rate_limit_per_minute=3)
-        limiter = RateLimiter(settings)
-        key = ("default", "127.0.0.1")
-        assert all(limiter.allowed(key, "default", float(t)) for t in (0.0, 1.0, 2.0))
-        assert not limiter.allowed(key, "default", 3.0)
-        # Window slides: after 60 s the budget returns.
-        assert limiter.allowed(key, "default", 61.0)
+        limiter = RateLimiter(settings, InMemoryRateLimitBackend())
+        assert await limiter.allowed("default", "127.0.0.1") == (True, 0)
+        assert await limiter.allowed("default", "127.0.0.1") == (True, 0)
+        assert await limiter.allowed("default", "127.0.0.1") == (True, 0)
+        allowed, retry_after = await limiter.allowed("default", "127.0.0.1")
+        assert allowed is False
+        assert retry_after >= 1
+        # A different identifier has its own budget.
+        assert await limiter.allowed("default", "10.9.9.9") == (True, 0)
 
-    def test_eval_bucket_uses_tighter_limit(self):
+    async def test_eval_bucket_uses_tighter_limit(self):
         settings = make_settings(
             rate_limit_per_minute=100, rate_limit_eval_per_minute=1
         )
-        limiter = RateLimiter(settings)
-        key = ("eval", "10.0.0.1")
-        assert limiter.allowed(key, "eval", 0.0)
-        assert not limiter.allowed(key, "eval", 1.0)
+        limiter = RateLimiter(settings, InMemoryRateLimitBackend())
+        assert await limiter.allowed("eval", "10.0.0.1") == (True, 0)
+        allowed, _ = await limiter.allowed("eval", "10.0.0.1")
+        assert allowed is False
 
     def test_middleware_returns_429_envelope(self):
         settings = make_settings(rate_limit_per_minute=1)

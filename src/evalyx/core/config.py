@@ -66,14 +66,37 @@ class Settings(BaseSettings):
     # and is never public; it exposes the in-process operational registry.
     metrics_enabled: bool = True
 
-    # Rate limiting / abuse baseline (Phase 17). Simple in-memory
-    # fixed-window limiter, per process. Correct for a single API replica;
-    # multi-replica deployments need an external (Redis) limiter — see
-    # docs/deployment.md limitations.
+    # Rate limiting (Phase 18). Redis-backed, atomic fixed-window counters
+    # shared across all API replicas — the Phase 17 process-local limiter
+    # is gone. Keys are bounded (bucket × sanitized identifier × window)
+    # with a 60 s TTL. When Redis is unavailable the configured policy
+    # applies loudly (warning log + metric) — never a silent per-process
+    # fallback.
     rate_limit_enabled: bool = True
     rate_limit_per_minute: int = Field(default=120, ge=1, le=100000)
     rate_limit_eval_per_minute: int = Field(default=20, ge=1, le=100000)
     rate_limit_test_per_minute: int = Field(default=10, ge=1, le=100000)
+    rate_limit_redis_prefix: str = "evalyx:rl"
+    rate_limit_on_redis_error: Literal["allow", "deny"] = "allow"
+
+    # Organization quotas (Phase 18). Server-side admission enforced in
+    # PostgreSQL under a per-organization row lock (race-safe); independent
+    # from billing/subscriptions (there are none). Per-organization
+    # overrides live in the organization_quota_overrides table.
+    quota_enabled: bool = True
+    quota_max_applications: int = Field(default=50, ge=1, le=100000)
+    quota_max_datasets: int = Field(default=50, ge=1, le=100000)
+    quota_max_cases_per_dataset_version: int = Field(default=5000, ge=1, le=100000)
+    quota_max_evaluations_per_day: int = Field(default=100, ge=1, le=100000)
+    quota_max_connection_tests_per_day: int = Field(default=200, ge=1, le=100000)
+    quota_max_concurrent_evaluations: int = Field(default=5, ge=1, le=1000)
+    #: Active runs older than this stop counting toward the concurrency
+    #: quota (worker-loss safety valve; must exceed the worker hard limit).
+    quota_stale_run_seconds: int = Field(default=7200, ge=600, le=86400)
+
+    # Audit log (Phase 18). Durable tenant-scoped security/resource events.
+    audit_enabled: bool = True
+    audit_retention_days: int = Field(default=90, ge=1, le=3650)
 
     # Evaluation concurrency / abuse bounds (Phase 17; Phase 18 adds quotas).
     max_cases_per_evaluation: int = Field(default=500, ge=1, le=100000)
@@ -116,6 +139,11 @@ class Settings(BaseSettings):
     # print(secrets.token_urlsafe(32))"). Required in production; optional
     # in development until a secret is actually stored.
     evalyx_encryption_key: SecretStr = SecretStr("")
+    # Previous encryption keys (Phase 18 rotation). Comma-separated urlsafe
+    # base64 32-byte keys that remain able to *decrypt* (never encrypt).
+    # During rotation the old key lives here while stored credentials are
+    # re-encrypted to the current key; afterwards remove it.
+    evalyx_previous_encryption_keys: SecretStr = SecretStr("")
 
     # Security
     evalyx_secret_key: SecretStr = SecretStr("")
@@ -207,6 +235,19 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_previous_encryption_keys(self) -> Settings:
+        """Fail fast on malformed rotation keys (never echo values)."""
+        for raw in self.previous_encryption_key_values:
+            try:
+                decode_encryption_key(raw)
+            except ValueError:
+                raise ValueError(
+                    "EVALYX_PREVIOUS_ENCRYPTION_KEYS must be comma-separated "
+                    "urlsafe base64-encoded 32-byte keys."
+                ) from None
+        return self
+
+    @model_validator(mode="after")
     def _validate_clerk_settings(self) -> Settings:
         """Clerk must be fully configured when authentication is required."""
         if self.auth_required and self.clerk_jwks_url.strip() == "":
@@ -237,6 +278,12 @@ class Settings(BaseSettings):
     def cors_origins(self) -> list[str]:
         """Explicit CORS origins (empty = CORS disabled)."""
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def previous_encryption_key_values(self) -> list[str]:
+        """Previous encryption keys (decrypt-only rotation history)."""
+        raw = self.evalyx_previous_encryption_keys.get_secret_value()
+        return [part.strip() for part in raw.split(",") if part.strip()]
 
     @property
     def is_development(self) -> bool:

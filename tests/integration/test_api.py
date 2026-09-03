@@ -391,7 +391,9 @@ async def test_submit_evaluation_enqueue_failure_marks_run_failed(api):
 
     # Real service, real PostgreSQL — only the broker call fails.
     app.dependency_overrides[get_evaluation_service] = lambda: EvaluationService(
-        app.state.database.session_factory, enqueue=broken_enqueue
+        app.state.database.session_factory,
+        enqueue=broken_enqueue,
+        settings=app.state.settings,
     )
 
     response = await client.post("/api/v1/evaluations", json=payload)

@@ -10,9 +10,11 @@ evaluation engine cannot tell the two apart — it only calls ``invoke``.
 Safety properties (all bounded, all secret-free):
 
 - **SSRF**: every destination (including every redirect hop) is validated
-  by :mod:`evalyx.application.ssrf` before the request; proxies from the
-  environment are ignored; redirects are followed manually, never by the
-  HTTP client.
+  by :mod:`evalyx.application.ssrf` before the request, **and** the
+  connection itself is pinned to a validated address by
+  :mod:`evalyx.application.pinning` (closing the DNS/TCP TOCTOU window
+  while preserving Host/SNI); proxies from the environment are ignored;
+  redirects are followed manually, never by the HTTP client.
 - **HTTP**: bounded connect/read timeouts, a hard response-size cap, and
   bounded retries with exponential backoff — retrying only transient
   failures (connect errors, timeouts, HTTP 502/503/504).
@@ -38,6 +40,7 @@ from evalyx.application.connection import (
     build_request_body,
     extract_answer,
 )
+from evalyx.application.pinning import PinningAsyncHTTPTransport
 from evalyx.application.ssrf import (
     SSRFViolationError,
     assert_url_resolves_public,
@@ -80,6 +83,7 @@ class HTTPApplicationTarget:
         secret: str | None = None,
         application_name: str = "application",
         client: httpx.AsyncClient | None = None,
+        transport: httpx.AsyncHTTPTransport | None = None,
     ) -> None:
         if connection.auth.requires_secret and not secret:
             raise ApplicationInvocationError(
@@ -98,10 +102,12 @@ class HTTPApplicationTarget:
                 write=CONNECT_TIMEOUT_SECONDS,
                 pool=CONNECT_TIMEOUT_SECONDS,
             ),
-            # SSRF hardening: never route through ambient proxy config, and
-            # never let httpx follow redirects (each hop is validated here).
+            # SSRF hardening: never route through ambient proxy config, never
+            # let httpx follow redirects (each hop is validated here), and
+            # pin every connection to a validated address (TOCTOU closure).
             trust_env=False,
             follow_redirects=False,
+            transport=transport or PinningAsyncHTTPTransport(),
         )
 
     async def invoke(self, prompt: str) -> ApplicationResponse:

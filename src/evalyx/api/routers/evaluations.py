@@ -166,8 +166,12 @@ async def submit_evaluation(
     service: Annotated[EvaluationService, Depends(get_evaluation_service)],
     context: TenantContext,
 ) -> EvaluationSubmissionResponse:
-    _auth, organization = context
-    run, task_id = await service.submit(payload, organization_id=organization.id)
+    auth, organization = context
+    run, task_id = await service.submit(
+        payload,
+        organization_id=organization.id,
+        clerk_user_id=auth.clerk_user_id,
+    )
     return EvaluationSubmissionResponse(
         run_id=run.id,
         status=run.status,

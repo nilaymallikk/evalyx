@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import (
+    get_quota_service,
     get_session,
     get_settings,
     pagination_params,
@@ -57,6 +58,15 @@ from evalyx.core.metrics import metrics
 from evalyx.db.models import Application, ApplicationVersion, Organization
 from evalyx.db.repositories import ApplicationRepository, NotFoundError
 from evalyx.evaluation.failures import classify_failure
+from evalyx.quotas import QuotaService
+from evalyx.security.audit import (
+    APPLICATION_CREATE,
+    APPLICATION_DELETE,
+    APPLICATION_SECRET_ROTATE,
+    APPLICATION_UPDATE,
+    APPLICATION_VERSION_CREATE,
+    record_audit_event,
+)
 
 router = APIRouter(prefix="/applications", tags=["applications"])
 
@@ -108,8 +118,14 @@ async def create_application(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
+    quotas: Annotated[QuotaService, Depends(get_quota_service)],
 ) -> ApplicationResponse:
-    _auth, organization = context
+    auth, organization = context
+    await quotas.admit_application_create(
+        session,
+        organization_id=organization.id,
+        clerk_user_id=auth.clerk_user_id,
+    )
     encrypted_secret = None
     secret_metadata = None
     if payload.secret is not None:
@@ -117,6 +133,7 @@ async def create_application(
         encrypted_secret = encryptor.encrypt(payload.secret)
         secret_metadata = {
             "key_version": CIPHERTEXT_VERSION,
+            "key_id": encryptor.current_key_id,
             "rotated_at": datetime.now(UTC).isoformat(),
         }
     application = await _repository().create(
@@ -128,6 +145,21 @@ async def create_application(
         encrypted_secret=encrypted_secret,
         secret_metadata=secret_metadata,
     )
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=APPLICATION_CREATE,
+            resource_type="application",
+            resource_id=application.id,
+            details={
+                "name": payload.name,
+                "connection_type": payload.connection_type,
+                "secret_configured": encrypted_secret is not None,
+            },
+        )
+        await session.commit()
     return ApplicationResponse.from_application(application)
 
 
@@ -181,13 +213,25 @@ async def update_application(
     application_id: uuid.UUID,
     payload: ApplicationUpdate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> ApplicationResponse:
-    _auth, organization = context
+    auth, organization = context
     application = await _require_application(session, application_id, organization.id)
     updated = await _repository().update(
         session, application, name=payload.name, description=payload.description
     )
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=APPLICATION_UPDATE,
+            resource_type="application",
+            resource_id=application.id,
+            details={"name": updated.name},
+        )
+        await session.commit()
     return ApplicationResponse.from_application(updated)
 
 
@@ -207,11 +251,24 @@ async def update_application(
 async def delete_application(
     application_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> None:
-    _auth, organization = context
+    auth, organization = context
     application = await _require_application(session, application_id, organization.id)
+    application_name = application.name
     await _repository().delete(session, application)
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=APPLICATION_DELETE,
+            resource_type="application",
+            resource_id=application_id,
+            details={"name": application_name},
+        )
+        await session.commit()
 
 
 @router.patch(
@@ -232,7 +289,7 @@ async def rotate_application_secret(
     settings: Annotated[Settings, Depends(get_settings)],
     context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> ApplicationSecretStateResponse:
-    _auth, organization = context
+    auth, organization = context
     application = await _require_application(session, application_id, organization.id)
     encryptor = SecretEncryptor.from_settings(settings)
     await _repository().set_secret(
@@ -241,9 +298,23 @@ async def rotate_application_secret(
         encrypted_secret=encryptor.encrypt(payload.secret),
         secret_metadata={
             "key_version": CIPHERTEXT_VERSION,
+            "key_id": encryptor.current_key_id,
             "rotated_at": datetime.now(UTC).isoformat(),
         },
     )
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=APPLICATION_SECRET_ROTATE,
+            resource_type="application",
+            resource_id=application.id,
+            # The credential itself is never recorded — only which key
+            # envelope version now protects it.
+            details={"key_version": CIPHERTEXT_VERSION, "key_id": encryptor.current_key_id},
+        )
+        await session.commit()
     return ApplicationSecretStateResponse(secret_configured=True)
 
 
@@ -335,9 +406,10 @@ async def create_application_version(
     application_id: uuid.UUID,
     payload: ApplicationVersionCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
 ) -> ApplicationVersion:
-    _auth, organization = context
+    auth, organization = context
     repository = _repository()
     application = await repository.get_in_organization(
         session, application_id, organization_id=organization.id
@@ -346,7 +418,7 @@ async def create_application_version(
         raise NotFoundError(f"Application {application_id} does not exist.")
     if payload.connection is not None:
         _require_http(application)
-    return await repository.create_version(
+    version = await repository.create_version(
         session,
         application_id=application_id,
         version=payload.version,
@@ -354,6 +426,18 @@ async def create_application_version(
         configuration=payload.sanitized_configuration(),
         connection=payload.validated_connection(),
     )
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=APPLICATION_VERSION_CREATE,
+            resource_type="application_version",
+            resource_id=version.id,
+            details={"application_id": str(application_id), "version": payload.version},
+        )
+        await session.commit()
+    return version
 
 
 @router.post(
@@ -379,10 +463,16 @@ async def test_application_connection(
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
     context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
+    quotas: Annotated[QuotaService, Depends(get_quota_service)],
 ) -> ConnectionTestResponse:
-    _auth, organization = context
+    auth, organization = context
     repository = _repository()
     application = await _require_application(session, application_id, organization.id)
+    audit_event_id = await quotas.admit_connection_test(
+        session,
+        organization_id=organization.id,
+        clerk_user_id=auth.clerk_user_id,
+    )
     target = await _build_test_target(
         session, repository, application, payload.version_id, settings
     )
@@ -393,6 +483,13 @@ async def test_application_connection(
         except ApplicationInvocationError as exc:
             failure = classify_failure(exc, attempts=exc.attempts)
             metrics.increment("application_connection_tests_total", {"outcome": "error"})
+            await quotas.record_connection_test_outcome(
+                session,
+                event_id=audit_event_id,
+                application_id=application.id,
+                success=False,
+            )
+            await session.commit()
             return ConnectionTestResponse(
                 success=False,
                 http_status=failure.http_status,
@@ -402,6 +499,13 @@ async def test_application_connection(
         with suppress(Exception):
             await target.close()
     metrics.increment("application_connection_tests_total", {"outcome": "success"})
+    await quotas.record_connection_test_outcome(
+        session,
+        event_id=audit_event_id,
+        application_id=application.id,
+        success=True,
+    )
+    await session.commit()
     return ConnectionTestResponse(
         success=True,
         latency_ms=response.latency_ms,

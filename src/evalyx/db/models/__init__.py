@@ -13,6 +13,7 @@ from evalyx.db.models.evaluation import (
     EvaluationRun,
     RunStatus,
 )
+from evalyx.db.models.governance import AuditEvent, OrganizationQuotaOverrides
 from evalyx.db.models.guardrail import GuardrailResult, GuardrailStatus
 from evalyx.db.models.organization import Organization, OrganizationMembershipAudit
 from evalyx.db.models.regression import ComparisonResult, RegressionComparison
@@ -20,6 +21,7 @@ from evalyx.db.models.regression import ComparisonResult, RegressionComparison
 __all__ = [
     "Application",
     "ApplicationVersion",
+    "AuditEvent",
     "Base",
     "CaseStatus",
     "ComparisonResult",
@@ -31,6 +33,7 @@ __all__ = [
     "GuardrailStatus",
     "Organization",
     "OrganizationMembershipAudit",
+    "OrganizationQuotaOverrides",
     "RegressionComparison",
     "RunStatus",
     "TestCase",

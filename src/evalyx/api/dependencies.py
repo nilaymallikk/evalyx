@@ -39,6 +39,7 @@ from evalyx.db.models import Organization
 from evalyx.db.session import DatabaseManager
 from evalyx.db.tenancy import require_organization as require_organization_row
 from evalyx.evaluation.regression.service import RegressionService
+from evalyx.quotas import QuotaService
 
 
 def get_settings(request: Request) -> Settings:
@@ -124,6 +125,7 @@ async def require_authenticated_user(
 async def require_organization(
     session: Annotated[AsyncSession, Depends(get_session)],
     auth: Annotated[AuthContext, Depends(require_authenticated_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> tuple[AuthContext, Organization]:
     """Tenant-scoped endpoint guard.
 
@@ -131,8 +133,24 @@ async def require_organization(
     maps it to the local tenant row (auto-provisioned on first use). The
     returned ``organization.id`` is the only tenant id endpoints may use —
     client-supplied organization/workspace fields are never trusted.
+
+    An authenticated user without an active organization is denied with a
+    durable audit row (committed before raising) so authorization failures
+    are observable beyond logs.
     """
     if auth.clerk_organization_id is None:
+        if settings.audit_enabled:
+            from evalyx.security.audit import (
+                AUTH_ORGANIZATION_REQUIRED,
+                record_denial_and_commit,
+            )
+
+            await record_denial_and_commit(
+                session,
+                organization_id=None,
+                clerk_user_id=auth.clerk_user_id,
+                action=AUTH_ORGANIZATION_REQUIRED,
+            )
         raise OrganizationRequiredError(
             "An active organization is required for this operation."
         )
@@ -183,6 +201,14 @@ def get_evaluation_service(request: Request) -> EvaluationService:
     return EvaluationService(
         request.app.state.database.session_factory,
         settings=request.app.state.settings,
+    )
+
+
+def get_quota_service(request: Request) -> QuotaService:
+    """QuotaService bound to the session factory and settings."""
+    return QuotaService(
+        request.app.state.database.session_factory,
+        request.app.state.settings,
     )
 
 

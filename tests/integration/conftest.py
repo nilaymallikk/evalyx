@@ -1,5 +1,6 @@
 """Shared fixtures for integration tests (live PostgreSQL on localhost:5433)."""
 
+import uuid
 from collections.abc import AsyncIterator
 
 import pytest
@@ -19,6 +20,8 @@ DOMAIN_TABLES = (
     "datasets",
     "application_versions",
     "applications",
+    "audit_events",
+    "organization_quota_overrides",
     "organization_membership_audit",
     "organizations",
 )
@@ -31,8 +34,16 @@ def settings() -> Settings:
     Clerk is bypassed in integration tests: resource endpoints resolve the
     fake tenant via the dependency override in the ``api`` fixture. Auth
     behavior itself is covered hermetically in tests/unit/test_auth_api.py.
+
+    Each test gets an isolated rate-limit Redis namespace so the
+    distributed limiter (shared Redis by design) cannot leak budgets
+    across tests. Cross-replica sharing is covered explicitly by the
+    Phase 18 rate-limit tests with a shared prefix.
     """
-    return Settings(auth_required=False)
+    return Settings(
+        auth_required=False,
+        rate_limit_redis_prefix=f"evalyx:test-rl:{uuid.uuid4().hex[:12]}",
+    )
 
 
 @pytest.fixture

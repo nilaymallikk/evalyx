@@ -75,7 +75,11 @@ async def clean_db(db_manager: DatabaseManager):
 
 
 async def _client(db: DatabaseManager, clerk_org_id: str | None) -> AsyncClient:
-    settings = Settings(auth_required=False)
+    # Isolated rate-limit namespace per client (shared Redis by design).
+    settings = Settings(
+        auth_required=False,
+        rate_limit_redis_prefix=f"evalyx:test-rl:{uuid.uuid4().hex[:12]}",
+    )
     app = create_app(settings, database=db)
     if clerk_org_id is not None:
         app.dependency_overrides[require_organization] = _tenant_override(
@@ -92,7 +96,10 @@ async def _unauthenticated_client(db: DatabaseManager) -> AsyncClient:
         async def verify(self, request) -> AuthContext:
             raise AuthenticationError("Authentication failed.")
 
-    settings = Settings(auth_required=False)
+    settings = Settings(
+        auth_required=False,
+        rate_limit_redis_prefix=f"evalyx:test-rl:{uuid.uuid4().hex[:12]}",
+    )
     app = create_app(settings, database=db)
     app.state.token_verifier = _RejectingVerifier()
     transport = ASGITransport(app=app)

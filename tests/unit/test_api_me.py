@@ -10,7 +10,12 @@ from evalyx.core.config import Settings
 
 
 def _client(auth: AuthContext) -> TestClient:
-    app = create_app(Settings(auth_required=False))
+    from evalyx.api.ratelimit import InMemoryRateLimitBackend
+
+    app = create_app(
+        Settings(auth_required=False),
+        rate_limit_backend=InMemoryRateLimitBackend(),
+    )
     app.dependency_overrides[require_authenticated_user] = lambda: auth
     return TestClient(app)
 
@@ -30,7 +35,12 @@ def test_me_endpoint_returns_token_derived_identity():
 
 
 def test_me_endpoint_requires_authentication():
-    app = create_app(Settings(auth_required=False))
+    from evalyx.api.ratelimit import InMemoryRateLimitBackend
+
+    app = create_app(
+        Settings(auth_required=False),
+        rate_limit_backend=InMemoryRateLimitBackend(),
+    )
     # Dev mode with no org header yields an anonymous context → 401.
     response = TestClient(app).get("/api/v1/me")
     assert response.status_code == 401

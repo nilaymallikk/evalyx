@@ -1,4 +1,4 @@
-# Production checklist (Phase 17)
+# Production checklist (Phase 17; Phase 18 additions marked ★)
 
 ## Before deployment
 
@@ -15,6 +15,11 @@
 - [ ] Migrations reviewed (`alembic upgrade head --sql` on staging first)
 - [ ] Image built reproducibly (`docker build -t evalyx:<tag> .`)
 - [ ] Unit + integration tests green, mypy + ruff clean
+- [ ] ★ Quota defaults reviewed (`QUOTA_*`); overrides set if needed
+- [ ] ★ `RATE_LIMIT_ON_REDIS_ERROR` policy chosen deliberately (allow/deny)
+- [ ] ★ Encryption rotation state known: pending count via dry-run is zero
+      unless a rotation is in progress (history key present only then)
+- [ ] ★ Audit retention scheduled (`AUDIT_RETENTION_DAYS`, cleanup SQL)
 
 ## Deploy
 
@@ -35,3 +40,5 @@
 - [ ] Authenticated `GET /api/v1/metrics` returns operational counters
 - [ ] `docker scout` / image inspection shows no `.env` or secrets
 - [ ] Rollback image tag recorded
+- [ ] ★ Over-quota probe denied cleanly (`429 quota_exceeded`, no leakage)
+- [ ] ★ Cross-tenant probe returns uniform 404s (no existence signals)

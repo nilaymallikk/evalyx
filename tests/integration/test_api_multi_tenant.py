@@ -59,7 +59,14 @@ async def clean_db(db_manager: DatabaseManager):
 async def _make_client(db: DatabaseManager, clerk_org_id: str) -> AsyncClient:
     from evalyx.core.config import Settings
 
-    app = create_app(Settings(auth_required=False), database=db)
+    # Isolated rate-limit namespace per client (shared Redis by design).
+    app = create_app(
+        Settings(
+            auth_required=False,
+            rate_limit_redis_prefix=f"evalyx:test-rl:{uuid.uuid4().hex[:12]}",
+        ),
+        database=db,
+    )
     app.dependency_overrides[require_organization] = _tenant_override(db, clerk_org_id)
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://testserver")

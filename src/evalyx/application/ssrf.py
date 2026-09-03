@@ -25,14 +25,19 @@ connect are two separate steps (a TOCTOU window exists between them).
 Defenses that shrink the window: the check re-runs before **every**
 transport attempt, redirects are followed manually with a full re-check of
 each hop, and proxy environment variables are ignored (``trust_env=False``)
-so an HTTP client cannot be redirected through a local proxy. Fully closing
-the window would require pinning connections to validated IPs at the
-transport layer (a custom httpcore transport) — deferred as future work.
+so an HTTP client cannot be redirected through a local proxy. The window is
+closed by :mod:`evalyx.application.pinning`, which resolves and validates
+*inside* the HTTP transport and connects only to a validated address
+(preserving Host/SNI) — the validated address is the connected address.
+Residual risk: a hostile DNS server that answers differently per query can
+still steer *which* public address is used, but every candidate address is
+validated public before use, so steering cannot reach private targets.
 """
 
 import asyncio
 import ipaddress
 import socket
+import struct
 from urllib.parse import urlparse
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
@@ -61,6 +66,37 @@ class SSRFViolationError(Exception):
     Safe by construction: the message describes the *rule* violated — never
     the URL's credentials (there must not be any) or internal topology.
     """
+
+
+def _parse_numeric_ipv4(host: str) -> ipaddress.IPv4Address | None:
+    """Interpret obfuscated numeric IPv4 literals (defense in depth).
+
+    Attackers write 127.0.0.1 as ``2130706433`` (decimal), ``0x7f000001``
+    (hex), ``0177.0.0.1`` (octal quads) or ``127.1`` (short form) to dodge
+    naive string blocklists. ``ipaddress`` rejects all of these, but the OS
+    resolver (``inet_aton`` semantics) accepts them — so configuration-time
+    validation must recognize them too. Returns the parsed address, or
+    ``None`` when ``host`` is not a numeric form.
+    """
+    try:
+        packed = socket.inet_aton(host)
+    except OSError:
+        packed = None
+    if packed is not None:
+        return ipaddress.IPv4Address(struct.unpack("!I", packed)[0])
+    candidate = host.strip()
+    try:
+        if candidate.lower().startswith("0x"):
+            value = int(candidate, 16)
+        elif candidate.isdigit():
+            value = int(candidate, 10)
+        else:
+            return None
+    except ValueError:
+        return None
+    if 0 <= value <= 0xFFFFFFFF:
+        return ipaddress.IPv4Address(value)
+    return None
 
 
 def _assert_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
@@ -103,17 +139,60 @@ def assert_static_url_allowed(url: str) -> None:
     hostname = parsed.hostname
     if not hostname:
         raise SSRFViolationError("Application endpoint must include a hostname.")
-    if parsed.port is not None and not (0 < parsed.port <= 65535):
+    try:
+        port = parsed.port
+    except ValueError:
+        raise SSRFViolationError("Application endpoint port is out of range.") from None
+    if port is not None and not (0 < port <= 65535):
         raise SSRFViolationError("Application endpoint port is out of range.")
     lowered = hostname.lower().rstrip(".")
     if lowered == "localhost" or lowered.endswith(".localhost"):
         raise SSRFViolationError("Application endpoint must not target localhost.")
     # Literal IPs are fully checkable right now; hostnames are checked at
-    # request time via DNS resolution.
+    # request time via DNS resolution. Obfuscated numeric literals (decimal,
+    # hex, octal, short forms) are recognized too — the OS resolver would
+    # accept them even though ``ipaddress`` does not.
     try:
         _assert_public_ip(ipaddress.ip_address(lowered))
     except ValueError:
-        return  # a hostname, not a literal IP — resolved later
+        pass
+    else:
+        return
+    obfuscated = _parse_numeric_ipv4(lowered)
+    if obfuscated is not None:
+        _assert_public_ip(obfuscated)
+
+
+async def resolve_public_addresses(hostname: str, port: int) -> list[str]:
+    """Resolve ``hostname`` and require every address to be public.
+
+    Returns the deduplicated validated address strings (first answer wins
+    for connection purposes). Raises :class:`SSRFViolationError` when
+    resolution fails or any address is non-public. Shared by the
+    request-time check and the pinning transport so both validate the same
+    way.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise SSRFViolationError(
+            "Application endpoint hostname could not be resolved."
+        ) from None
+    if not infos:
+        raise SSRFViolationError(
+            "Application endpoint hostname could not be resolved."
+        )
+    validated: list[str] = []
+    seen: set[str] = set()
+    for info in infos:
+        address = str(info[4][0])
+        if address in seen:
+            continue
+        seen.add(address)
+        _assert_public_ip(ipaddress.ip_address(address))
+        validated.append(address)
+    return validated
 
 
 async def assert_url_resolves_public(url: str) -> None:
@@ -126,24 +205,7 @@ async def assert_url_resolves_public(url: str) -> None:
     parsed = urlparse(url)
     hostname = parsed.hostname or ""
     port = parsed.port or _DEFAULT_PORTS.get(parsed.scheme.lower(), 80)
-    loop = asyncio.get_running_loop()
-    try:
-        infos = await loop.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        raise SSRFViolationError(
-            "Application endpoint hostname could not be resolved."
-        ) from None
-    if not infos:
-        raise SSRFViolationError(
-            "Application endpoint hostname could not be resolved."
-        )
-    seen: set[str] = set()
-    for info in infos:
-        address = str(info[4][0])
-        if address in seen:
-            continue
-        seen.add(address)
-        _assert_public_ip(ipaddress.ip_address(address))
+    await resolve_public_addresses(hostname, port)
 
 
 def is_redirect(status_code: int) -> bool:
@@ -157,4 +219,5 @@ __all__ = [
     "assert_static_url_allowed",
     "assert_url_resolves_public",
     "is_redirect",
+    "resolve_public_addresses",
 ]

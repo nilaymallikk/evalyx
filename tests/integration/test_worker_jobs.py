@@ -34,6 +34,8 @@ DOMAIN_TABLES = (
     "datasets",
     "application_versions",
     "applications",
+    "audit_events",
+    "organization_quota_overrides",
 )
 
 JUDGE_SYSTEM_PREFIX = "You are an evaluation judge for Evalyx"

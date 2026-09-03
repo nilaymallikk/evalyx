@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import (
+    get_quota_service,
     get_session,
+    get_settings,
     pagination_params,
     require_organization,
 )
@@ -25,9 +27,17 @@ from evalyx.api.schemas.datasets import (
     TestCaseCreate,
     TestCaseResponse,
 )
+from evalyx.core.config import Settings
 from evalyx.db.models import Dataset, DatasetVersion, Organization, TestCase
 from evalyx.db.repositories import DatasetRepository, NotFoundError
 from evalyx.evaluation.regression.comparison import sanitize_configuration
+from evalyx.quotas import QuotaService
+from evalyx.security.audit import (
+    DATASET_CASE_ADD,
+    DATASET_CREATE,
+    DATASET_VERSION_CREATE,
+    record_audit_event,
+)
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -82,15 +92,34 @@ async def _get_version_or_404(
 async def create_dataset(
     payload: DatasetCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     context: TenantContext,
+    quotas: Annotated[QuotaService, Depends(get_quota_service)],
 ) -> Dataset:
-    _auth, organization = context
-    return await _repository().create(
+    auth, organization = context
+    await quotas.admit_dataset_create(
+        session,
+        organization_id=organization.id,
+        clerk_user_id=auth.clerk_user_id,
+    )
+    dataset = await _repository().create(
         session,
         organization_id=organization.id,
         name=payload.name,
         description=payload.description,
     )
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=DATASET_CREATE,
+            resource_type="dataset",
+            resource_id=dataset.id,
+            details={"name": payload.name},
+        )
+        await session.commit()
+    return dataset
 
 
 @router.get(
@@ -192,9 +221,10 @@ async def create_dataset_version(
     dataset_id: uuid.UUID,
     payload: DatasetVersionCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     context: TenantContext,
 ) -> DatasetVersion:
-    _auth, organization = context
+    auth, organization = context
     if (
         await _repository().get_in_organization(
             session, dataset_id, organization_id=organization.id
@@ -202,9 +232,21 @@ async def create_dataset_version(
         is None
     ):
         raise NotFoundError(f"Dataset {dataset_id} does not exist.")
-    return await _repository().create_version(
+    version = await _repository().create_version(
         session, dataset_id=dataset_id, version=payload.version, description=payload.description
     )
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=DATASET_VERSION_CREATE,
+            resource_type="dataset_version",
+            resource_id=version.id,
+            details={"dataset_id": str(dataset_id), "version": payload.version},
+        )
+        await session.commit()
+    return version
 
 
 @router.post(
@@ -223,11 +265,19 @@ async def add_test_case(
     version: int,
     payload: TestCaseCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     context: TenantContext,
+    quotas: Annotated[QuotaService, Depends(get_quota_service)],
 ) -> TestCaseResponse:
-    _auth, organization = context
+    auth, organization = context
     dataset_version = await _get_version_or_404(
         session, dataset_id, version, organization_id=organization.id
+    )
+    await quotas.admit_case_add(
+        session,
+        organization_id=organization.id,
+        clerk_user_id=auth.clerk_user_id,
+        dataset_version_id=dataset_version.id,
     )
     case = await _repository().add_test_case(
         session,
@@ -238,6 +288,19 @@ async def add_test_case(
         context=payload.context,
         metadata=sanitize_configuration(payload.metadata),
     )
+    if settings.audit_enabled:
+        await record_audit_event(
+            session,
+            organization_id=organization.id,
+            clerk_user_id=auth.clerk_user_id,
+            action=DATASET_CASE_ADD,
+            resource_type="test_case",
+            resource_id=case.id,
+            # Inputs/expected outputs can carry arbitrary user content —
+            # record the case name only.
+            details={"dataset_version_id": str(dataset_version.id), "name": payload.name},
+        )
+        await session.commit()
     return _test_case_response(case)
 
 

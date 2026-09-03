@@ -33,7 +33,7 @@ def test_roundtrip(encryptor: SecretEncryptor):
 def test_envelope_is_versioned(encryptor: SecretEncryptor):
     envelope = encryptor.encrypt(SECRET)
     assert envelope.startswith(CIPHERTEXT_VERSION + ":")
-    assert len(envelope.split(":")) == 3
+    assert len(envelope.split(":")) == 4  # version:key-id:nonce:ciphertext
 
 
 def test_plaintext_never_appears_in_envelope(encryptor: SecretEncryptor):
@@ -50,10 +50,10 @@ def test_nonces_are_unique(encryptor: SecretEncryptor):
 
 def test_tampered_ciphertext_rejected(encryptor: SecretEncryptor):
     envelope = encryptor.encrypt(SECRET)
-    version, nonce, ciphertext = envelope.split(":")
+    version, key_id, nonce, ciphertext = envelope.split(":")
     corrupted = list(ciphertext)
     corrupted[0] = "A" if corrupted[0] != "A" else "B"
-    tampered = f"{version}:{nonce}:{''.join(corrupted)}"
+    tampered = f"{version}:{key_id}:{nonce}:{''.join(corrupted)}"
     with pytest.raises(EncryptionError, match="could not be decrypted"):
         encryptor.decrypt(tampered)
 

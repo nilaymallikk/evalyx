@@ -22,7 +22,7 @@ from redis.asyncio import Redis
 from evalyx.api.auth import create_token_verifier
 from evalyx.api.errors import register_error_handlers
 from evalyx.api.middleware import ObservabilityMiddleware
-from evalyx.api.ratelimit import RateLimitMiddleware
+from evalyx.api.ratelimit import RateLimitBackend, RateLimitMiddleware
 from evalyx.api.routers import api_router
 from evalyx.api.security_headers import SecurityHeadersMiddleware
 from evalyx.core.config import Settings, get_settings
@@ -40,13 +40,16 @@ def create_app(
     *,
     database: DatabaseManager | None = None,
     redis_client: Redis | None = None,
+    rate_limit_backend: RateLimitBackend | None = None,
 ) -> FastAPI:
     """Create the Evalyx FastAPI application.
 
     Accepting ``settings`` (and optionally pre-built infrastructure) keeps
     the app testable and avoids hidden global configuration. By default the
     engine, session factory, and Redis client are created here exactly once
-    per application.
+    per application. ``rate_limit_backend`` injects the rate-limit backend
+    (tests use the in-memory fake; production uses Redis via
+    ``redis_client``).
     """
     settings = settings or get_settings()
     configure_logging(settings)
@@ -136,7 +139,7 @@ def create_app(
         ObservabilityMiddleware,
         slow_request_threshold_ms=settings.slow_request_threshold_ms,
     )
-    app.add_middleware(RateLimitMiddleware, settings=settings)
+    app.add_middleware(RateLimitMiddleware, settings=settings, redis_client=redis_client, backend=rate_limit_backend)
     app.include_router(api_router)
 
     @app.get("/health", tags=["health"])

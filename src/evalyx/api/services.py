@@ -51,6 +51,8 @@ from evalyx.db.repositories import (
     EvaluationRepository,
     NotFoundError,
 )
+from evalyx.quotas import QuotaService
+from evalyx.security.audit import EVALUATION_SUBMIT, record_audit_event
 
 logger = structlog.get_logger(__name__)
 
@@ -74,29 +76,49 @@ class EvaluationService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         enqueue=None,
-        settings: Settings | None = None,
+        *,
+        settings: Settings,
     ) -> None:
+        """Build the submission service.
+
+        ``settings`` is required (keyword-only): quota admission and audit
+        behavior come from it, and there must be no silent
+        quota-less construction path in production code. The
+        ``get_evaluation_service`` dependency always injects the real
+        settings.
+        """
         self._session_factory = session_factory
         self._enqueue = enqueue or default_enqueue
         self._settings = settings
+        self._quotas = QuotaService(session_factory, settings)
         self._applications = ApplicationRepository()
         self._datasets = DatasetRepository()
         self._evaluations = EvaluationRepository()
 
     async def submit(
-        self, request: EvaluationCreate, *, organization_id: uuid.UUID
+        self,
+        request: EvaluationCreate,
+        *,
+        organization_id: uuid.UUID,
+        clerk_user_id: str,
     ) -> tuple[EvaluationRun, str | None]:
         """Validate, persist, and enqueue one evaluation run.
 
         ``organization_id`` is the authenticated tenant (from the verified
         Clerk session, never from request data). Every referenced resource
         must belong to it. Returns ``(run, task_id)``. Raises
-        :class:`NotFoundError` for missing/foreign references and
+        :class:`NotFoundError` for missing/foreign references,
+        :class:`QuotaExceededError` when the organization is over quota, and
         :class:`EvaluationSubmissionError` when enqueueing fails (the run is
         marked ``failed`` before that).
         """
         async with self._session_factory() as session:
-            run = await self._create_run(session, request, organization_id=organization_id)
+            run = await self._create_run(
+                session,
+                request,
+                organization_id=organization_id,
+                clerk_user_id=clerk_user_id,
+            )
 
         task_id: str | None
         try:
@@ -133,11 +155,15 @@ class EvaluationService:
         request: EvaluationCreate,
         *,
         organization_id: uuid.UUID,
+        clerk_user_id: str,
     ) -> EvaluationRun:
         """Validate references and persist the pending run (commits).
 
         All references are tenant-checked: a foreign application or dataset
-        version is indistinguishable from a missing one (404).
+        version is indistinguishable from a missing one (404). Quota
+        admission (concurrency + daily budget) runs under the organization
+        row lock in this same transaction, so concurrent submissions
+        serialize against committed run state.
         """
         application = await self._applications.get_in_organization(
             session, request.application_id, organization_id=organization_id
@@ -186,11 +212,7 @@ class EvaluationService:
         # Phase 17 production bound: one organization must not trivially
         # consume all worker capacity with a huge dataset version. Bounded
         # 422 (counts only, never payloads); Phase 18 adds quotas.
-        max_cases = (
-            self._settings.max_cases_per_evaluation
-            if self._settings is not None
-            else 500
-        )
+        max_cases = self._settings.max_cases_per_evaluation
         case_count = int(
             await session.scalar(
                 select(func.count())
@@ -205,7 +227,16 @@ class EvaluationService:
                 f"limit of {max_cases} cases per evaluation."
             )
 
-        return await self._evaluations.create_run(
+        # Phase 18 quotas: concurrency + daily budget, admitted under the
+        # organization row lock in this transaction (race-safe). Capacity
+        # is released by terminal run transitions, never by a release call.
+        await self._quotas.admit_evaluation(
+            session,
+            organization_id=organization_id,
+            clerk_user_id=clerk_user_id,
+        )
+
+        run = await self._evaluations.create_run(
             session,
             organization_id=organization_id,
             application_id=request.application_id,
@@ -215,6 +246,23 @@ class EvaluationService:
             judge_model=request.judge_model,
             configuration_snapshot=request.configuration_snapshot,
         )
+        if self._settings.audit_enabled:
+            await record_audit_event(
+                session,
+                organization_id=organization_id,
+                clerk_user_id=clerk_user_id,
+                action=EVALUATION_SUBMIT,
+                resource_type="evaluation_run",
+                resource_id=run.id,
+                details={
+                    "application_id": str(request.application_id),
+                    "dataset_version_id": str(request.dataset_version_id),
+                    "agent_model": request.agent_model,
+                    "case_count": case_count,
+                },
+            )
+            await session.commit()
+        return run
 
     async def _mark_failed(self, run_id: uuid.UUID) -> None:
         """Best-effort transition of a stranded run to the terminal failure."""

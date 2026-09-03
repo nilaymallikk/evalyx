@@ -57,7 +57,12 @@ def test_dev_context_is_never_used_in_production_mode():
 def test_dev_org_requests_reach_authenticated_routes():
     """A dev-org request hitting an authenticated route flows through the
     real auth dependency chain (the verifier swap happens in get_token_verifier)."""
-    app = create_app(Settings(auth_required=False))
+    from evalyx.api.ratelimit import InMemoryRateLimitBackend
+
+    app = create_app(
+        Settings(auth_required=False),
+        rate_limit_backend=InMemoryRateLimitBackend(),
+    )
     client = TestClient(app, raise_server_exceptions=False)
     # /api/v1/me is authenticated-user-only (works without an org).
     response = client.get(

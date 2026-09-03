@@ -139,13 +139,15 @@ rate-limited; per-run case execution stays sequential by design).
 
 ## 9. Rate limiting & evaluation bounds
 
-In-memory fixed-window limiter (per API process): 120 req/min default, 20
-evaluation submissions/min, 10 connection tests/min, per-IP health-endpoint
-baseline. Oversized bodies get 413; over-limit gets 429 + `Retry-After`.
-Evaluations are additionally bounded by `MAX_CASES_PER_EVALUATION` (default
-500 → 422 `evaluation_too_large`). One org cannot trivially exhaust workers.
-Limitation: per-process state — correct for the single-worker reference
-compose; multi-replica needs a Redis-backed limiter (Phase 18).
+Redis-backed atomic fixed-window limiter shared across API replicas: 120
+req/min default, 20 evaluation submissions/min, 10 connection tests/min,
+per-IP health-endpoint baseline. Oversized bodies get 413; over-limit gets
+429 + `Retry-After`. Evaluations are additionally bounded by
+`MAX_CASES_PER_EVALUATION` (default 500 → 422 `evaluation_too_large`) and
+by per-organization quotas (Phase 18: 5 concurrent evaluations, 100/day,
+plus resource caps — see `docs/security.md`). Redis outage applies the
+configured `RATE_LIMIT_ON_REDIS_ERROR` policy loudly (log + metric), never
+a silent fallback.
 
 ## 10. Outbound networking (Phase 15 protections intact)
 
@@ -252,10 +254,10 @@ Place `fullchain.pem`/`privkey.pem` at `TLS_CERT_PATH`/`TLS_KEY_PATH`, set
 the `server_name` in `deploy/nginx.conf` to the public hostname, and keep
 port 80 only for the HTTP→HTTPS redirect. The FastAPI port is never public.
 
-## 19. Known limitations (Phase 18 candidates)
+## 19. Known limitations (Phase 19 candidates)
 
-Per-process rate limits (no shared limiter), no per-org quotas or billing,
-no multi-replica metrics aggregation, no automated backups, no master-key
-rotation with re-encryption, DNS-check/TCP-connect TOCTOU window (Phase 15),
-threshold-based (not statistical) regression. None of these block a safe
-single-site production deployment.
+No billing, no automated backups, threshold-based (not statistical)
+regression, per-IP (not per-org-tier) rate limits, quota overrides and
+audit reads via SQL only. None of these block a safe multi-tenant
+deployment at the documented defaults. See `docs/security.md §8` for the
+full residual list.

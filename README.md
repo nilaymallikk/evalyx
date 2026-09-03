@@ -46,7 +46,7 @@ REGRESSION DETECTED
                 [hallucination, instruction_following]
 ```
 
-## Status: Phase 16 complete — CLI + terminal UI (Phases 1–15 built)
+## Status: Phase 18 complete — Security, quotas & production hardening (Phases 1–17 built)
 
 ### Currently implemented
 
@@ -68,6 +68,8 @@ REGRESSION DETECTED
 - MLGPT reference demo (`examples/mlgpt_demo/`) — end-to-end demonstration driving MLGPT (the reference RAG chatbot) through the REST API: idempotent setup, baseline run, controlled reversible behavior change, second run, and a Phase 8 regression comparison
 - Failure analysis (`src/evalyx/evaluation/failures.py`) — Phase 12 reliability layer: deterministic classification of *execution* failures (the application could not answer) into a small typed taxonomy, persisted on the case result and exposed through the API. Quality failures (the application answered, but the answer was bad) remain the domain of guardrails/scoring and are never conflated with infrastructure errors
 - Minimal API with health checks (`src/evalyx/api/app.py`): `GET /health` (liveness), `GET /health/ready` (dependency readiness)
+- Production deployment (Phase 17: `Dockerfile`, `docker-compose.production.yml`, nginx reverse proxy, `docs/deployment.md`, smoke/backup scripts)
+- Security, quotas & hardening (Phase 18, see `docs/security.md`): Redis-backed atomic rate limits shared across replicas; race-safe per-organization quotas (resources, daily budgets, concurrent evaluations with terminal-transition release); durable tenant-scoped audit log; AES-GCM keyring with `v2` envelopes and an idempotent re-encryption workflow (`scripts/reencrypt_credentials.py`); IP-pinning SSRF transport closing the DNS/TCP TOCTOU window; full cross-tenant 404 matrix; honest `503 database_unavailable` on outages
 - OpenRouter connectivity test for the selected free models (`test_openrouter.py`, run with `uv run python test_openrouter.py`)
 - Project scaffolding: `uv`-managed Python 3.14 environment, `src/` layout (`src/evalyx/`)
 

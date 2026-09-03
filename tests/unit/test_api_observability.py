@@ -22,7 +22,14 @@ def build_client(settings: Settings | None = None) -> TestClient:
     # No lifespan execution: no database/Redis connections are opened.
     # Tenant authentication is bypassed (observability is auth-agnostic);
     # Clerk behavior has its own suite (tests/unit/test_auth_api.py).
-    app = create_app(settings or Settings(auth_required=False))
+    # Explicit in-memory rate-limit backend: hermetic tests never touch
+    # real Redis (production always uses the Redis backend).
+    from evalyx.api.ratelimit import InMemoryRateLimitBackend
+
+    app = create_app(
+        settings or Settings(auth_required=False),
+        rate_limit_backend=InMemoryRateLimitBackend(),
+    )
     fake_context = (
         AuthContext(
             clerk_user_id="unit-test-user",
@@ -95,7 +102,9 @@ def test_error_responses_carry_request_id():
 
 def test_unexpected_500_response_still_carries_request_id():
     """§35/§58: the client gets a generic 500 but the correlation header."""
-    app = create_app(Settings())
+    from evalyx.api.ratelimit import InMemoryRateLimitBackend
+
+    app = create_app(Settings(), rate_limit_backend=InMemoryRateLimitBackend())
 
     async def boom_session() -> object:
         raise RuntimeError("internal probe failure")
