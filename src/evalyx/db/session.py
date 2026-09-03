@@ -26,8 +26,14 @@ class DatabaseManager:
         self._settings = settings
         self._engine: AsyncEngine = create_async_engine(
             settings.database_url,
-            # Connection pooling tuning belongs to a later phase.
+            # Production connection pooling (Phase 17): bounded pool with
+            # pre-ping so stale connections recycle instead of failing
+            # requests. Tune via DB_POOL_SIZE / DB_MAX_OVERFLOW.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_seconds,
             pool_pre_ping=True,
+            pool_recycle=1800,
         )
         self._session_factory = async_sessionmaker(
             self._engine,

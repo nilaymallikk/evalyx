@@ -2,11 +2,12 @@
 
 from fastapi import APIRouter
 
-from evalyx.api.routers import applications, datasets, evaluations, me, regressions
+from evalyx.api.routers import applications, datasets, evaluations, me, ops, regressions
 
 #: The complete /api/v1 surface. Health endpoints stay outside the version.
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(me.router)
+api_router.include_router(ops.router)
 api_router.include_router(applications.router)
 api_router.include_router(datasets.router)
 api_router.include_router(evaluations.router)

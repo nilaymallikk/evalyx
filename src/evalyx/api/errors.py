@@ -87,6 +87,18 @@ class ConnectionNotReadyError(Exception):
         self.code = "connection_not_ready"
 
 
+class EvaluationValidationError(Exception):
+    """An evaluation request is well-formed but exceeds safe bounds (422).
+
+    Used for production abuse bounds (e.g. dataset larger than
+    MAX_CASES_PER_EVALUATION). Message carries counts only — never payloads.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "evaluation_too_large"
+
+
 def _error_response(
     status_code: int,
     code: str,
@@ -186,6 +198,14 @@ def register_error_handlers(app: FastAPI) -> None:
         _: Request, exc: ConnectionNotReadyError
     ) -> JSONResponse:
         return _error_response(status.HTTP_409_CONFLICT, exc.code, str(exc))
+
+    @app.exception_handler(EvaluationValidationError)
+    async def _handle_evaluation_validation(
+        _: Request, exc: EvaluationValidationError
+    ) -> JSONResponse:
+        return _error_response(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, exc.code, str(exc)
+        )
 
     @app.exception_handler(ConnectionConfigError)
     async def _handle_connection_config(

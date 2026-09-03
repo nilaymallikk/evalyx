@@ -12,6 +12,32 @@ import structlog
 
 from evalyx.core.config import Settings
 
+#: Event-dict keys whose values must never reach logs (case-insensitive
+#: substring match). Applied as a structlog processor so a caller that
+#: accidentally logs a credential gets "[redacted]" instead of the secret.
+_SENSITIVE_SUBSTRINGS = (
+    "secret",
+    "token",
+    "password",
+    "api_key",
+    "apikey",
+    "authorization",
+    "encryption_key",
+    "clerk",
+    "credential",
+    "bearer",
+)
+
+
+def _redact_sensitive(
+    _: object, __: str, event_dict: structlog.typing.EventDict
+) -> structlog.typing.EventDict:
+    for key in list(event_dict.keys()):
+        lowered = str(key).lower()
+        if any(part in lowered for part in _SENSITIVE_SUBSTRINGS):
+            event_dict[key] = "[redacted]"
+    return event_dict
+
 
 def configure_logging(settings: Settings) -> None:
     """Configure stdlib + structlog logging from application settings.
@@ -27,6 +53,7 @@ def configure_logging(settings: Settings) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            _redact_sensitive,
             structlog.processors.format_exc_info,
             structlog.dev.ConsoleRenderer()
             if settings.is_development

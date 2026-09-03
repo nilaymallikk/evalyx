@@ -22,7 +22,9 @@ from redis.asyncio import Redis
 from evalyx.api.auth import create_token_verifier
 from evalyx.api.errors import register_error_handlers
 from evalyx.api.middleware import ObservabilityMiddleware
+from evalyx.api.ratelimit import RateLimitMiddleware
 from evalyx.api.routers import api_router
+from evalyx.api.security_headers import SecurityHeadersMiddleware
 from evalyx.core.config import Settings, get_settings
 from evalyx.core.logging import configure_logging
 from evalyx.db.redis import check_redis, create_redis_client
@@ -54,9 +56,18 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        logger.info(
+            "api_startup",
+            app_env=settings.app_env,
+            api_workers=settings.api_workers,
+        )
         yield
+        # Graceful shutdown: stop accepting new work (server closes the
+        # listener first), then release pooled resources.
+        logger.info("api_shutdown")
         await database.dispose()
         await redis_client.aclose()
+        logger.info("api_shutdown_complete")
 
     app = FastAPI(
         title="Evalyx",
@@ -102,12 +113,30 @@ def create_app(
     _decorate_openapi()
 
     register_error_handlers(app)
+    # Restrictive CORS: disabled unless CORS_ALLOWED_ORIGINS names explicit
+    # origins (never "*"; the CLI/TUI/API clients do not need CORS).
+    if settings.cors_origins:
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_methods=["GET", "POST", "PATCH", "DELETE"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+            allow_credentials=False,
+            max_age=600,
+        )
+    # Middleware order: last added runs first (outermost). Rate limiting is
+    # outermost (reject abuse before correlation work), then observability,
+    # then security headers closest to the router.
+    app.add_middleware(SecurityHeadersMiddleware)
     # Outermost user middleware: request correlation, structured lifecycle
     # logging and bounded-label HTTP metrics for every request.
     app.add_middleware(
         ObservabilityMiddleware,
         slow_request_threshold_ms=settings.slow_request_threshold_ms,
     )
+    app.add_middleware(RateLimitMiddleware, settings=settings)
     app.include_router(api_router)
 
     @app.get("/health", tags=["health"])

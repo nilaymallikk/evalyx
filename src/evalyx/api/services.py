@@ -38,11 +38,13 @@ import uuid
 
 import anyio
 import structlog
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from evalyx.api.errors import EvaluationSubmissionError
+from evalyx.api.errors import EvaluationSubmissionError, EvaluationValidationError
 from evalyx.api.schemas.evaluations import EvaluationCreate
-from evalyx.db.models import ApplicationVersion, EvaluationRun, RunStatus
+from evalyx.core.config import Settings
+from evalyx.db.models import ApplicationVersion, EvaluationRun, RunStatus, TestCase
 from evalyx.db.repositories import (
     ApplicationRepository,
     DatasetRepository,
@@ -72,9 +74,11 @@ class EvaluationService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         enqueue=None,
+        settings: Settings | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._enqueue = enqueue or default_enqueue
+        self._settings = settings
         self._applications = ApplicationRepository()
         self._datasets = DatasetRepository()
         self._evaluations = EvaluationRepository()
@@ -177,6 +181,28 @@ class EvaluationService:
         if dataset_version is None:
             raise NotFoundError(
                 f"Dataset version {request.dataset_version_id} does not exist."
+            )
+
+        # Phase 17 production bound: one organization must not trivially
+        # consume all worker capacity with a huge dataset version. Bounded
+        # 422 (counts only, never payloads); Phase 18 adds quotas.
+        max_cases = (
+            self._settings.max_cases_per_evaluation
+            if self._settings is not None
+            else 500
+        )
+        case_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(TestCase)
+                .where(TestCase.dataset_version_id == dataset_version.id)
+            )
+            or 0
+        )
+        if case_count > max_cases:
+            raise EvaluationValidationError(
+                f"Dataset version has {case_count} cases, exceeding the "
+                f"limit of {max_cases} cases per evaluation."
             )
 
         return await self._evaluations.create_run(

@@ -180,7 +180,10 @@ async def get_regression_service(
 
 def get_evaluation_service(request: Request) -> EvaluationService:
     """EvaluationService bound to the application's session factory."""
-    return EvaluationService(request.app.state.database.session_factory)
+    return EvaluationService(
+        request.app.state.database.session_factory,
+        settings=request.app.state.settings,
+    )
 
 
 def pagination_params(

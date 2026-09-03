@@ -50,6 +50,40 @@ class Settings(BaseSettings):
     # external monitoring dependency.
     slow_request_threshold_ms: int = Field(default=1000, ge=1)
 
+    # API server (Phase 17 production deployment). Host/port are read by the
+    # container entrypoint; workers=1 default keeps the in-memory rate
+    # limiter correct — raise only behind an external shared limiter.
+    api_host: str = "127.0.0.1"
+    api_port: int = Field(default=8000, ge=1, le=65535)
+    api_workers: int = Field(default=1, ge=1, le=32)
+
+    # CORS (Phase 17). Empty = no CORS headers (default; CLI/TUI/API
+    # clients do not need CORS). When set, must be explicit origins —
+    # never "*".
+    cors_allowed_origins: str = ""
+
+    # Metrics (Phase 17). The /metrics endpoint requires authentication
+    # and is never public; it exposes the in-process operational registry.
+    metrics_enabled: bool = True
+
+    # Rate limiting / abuse baseline (Phase 17). Simple in-memory
+    # fixed-window limiter, per process. Correct for a single API replica;
+    # multi-replica deployments need an external (Redis) limiter — see
+    # docs/deployment.md limitations.
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = Field(default=120, ge=1, le=100000)
+    rate_limit_eval_per_minute: int = Field(default=20, ge=1, le=100000)
+    rate_limit_test_per_minute: int = Field(default=10, ge=1, le=100000)
+
+    # Evaluation concurrency / abuse bounds (Phase 17; Phase 18 adds quotas).
+    max_cases_per_evaluation: int = Field(default=500, ge=1, le=100000)
+    max_request_body_bytes: int = Field(default=1_048_576, ge=1024)
+
+    # PostgreSQL connection pooling (Phase 17 production deployment).
+    db_pool_size: int = Field(default=5, ge=1, le=100)
+    db_max_overflow: int = Field(default=10, ge=0, le=200)
+    db_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+
     # LLM provider selection (azure_openai is a future provider)
     llm_provider: Literal["openrouter", "ollama"] = "openrouter"
 
@@ -177,13 +211,32 @@ class Settings(BaseSettings):
         """Clerk must be fully configured when authentication is required."""
         if self.auth_required and self.clerk_jwks_url.strip() == "":
             raise ValueError(
-                "AUTH_REQUIRED=1 requires CLERK_JWKS_URL (Clerk instance's "
-                ".well-known/jwks.json URL). To run without Clerk locally, "
-                "set AUTH_REQUIRED=0."
+                "Clerk configuration missing: AUTH_REQUIRED=1 requires "
+                "CLERK_JWKS_URL (Clerk instance's .well-known/jwks.json URL). "
+                "To run without Clerk locally, set AUTH_REQUIRED=0."
             )
         if self.auth_required and self.clerk_secret_key.get_secret_value().strip() == "":
-            raise ValueError("AUTH_REQUIRED=1 requires CLERK_SECRET_KEY.")
+            raise ValueError(
+                "Clerk configuration missing: AUTH_REQUIRED=1 requires "
+                "CLERK_SECRET_KEY."
+            )
         return self
+
+    @model_validator(mode="after")
+    def _validate_production_config(self) -> Settings:
+        """Production CORS sanity (never echo secrets)."""
+        origins = [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+        if "*" in origins:
+            raise ValueError(
+                "CORS wildcard '*' is not allowed; configure explicit origins "
+                "or leave CORS_ALLOWED_ORIGINS empty."
+            )
+        return self
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Explicit CORS origins (empty = CORS disabled)."""
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
     @property
     def is_development(self) -> bool:
