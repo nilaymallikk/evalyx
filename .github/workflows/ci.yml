@@ -1,0 +1,54 @@
+# Evalyx beta CI: fast, hermetic where possible.
+#
+# - lint (ruff), types (mypy), and unit tests run on every push/PR with no
+#   external services.
+# - alembic check (models vs migrations) runs against a service PostgreSQL.
+# - Live integration/security suites stay opt-in via EVALYX_RUN_INTEGRATION_TESTS
+#   (they need PostgreSQL + Redis + free-model access) and are exercised
+#   before releases instead of on every push.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-typecheck-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests
+      - run: uv run mypy src
+      - run: uv run pytest tests/unit -q
+        env:
+          EVALYX_SECRET_KEY: test-only-secret-key
+
+  migration-check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: evalyx
+          POSTGRES_PASSWORD: evalyx
+          POSTGRES_DB: evalyx
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U evalyx -d evalyx"
+          --health-interval 5s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run alembic upgrade head
+        env:
+          EVALYX_SECRET_KEY: test-only-secret-key
+          DATABASE_URL: postgresql+asyncpg://evalyx:evalyx@localhost:5433/evalyx
+      - run: uv run alembic check
+        env:
+          EVALYX_SECRET_KEY: test-only-secret-key
+          DATABASE_URL: postgresql+asyncpg://evalyx:evalyx@localhost:5433/evalyx

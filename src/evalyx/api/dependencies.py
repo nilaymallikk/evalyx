@@ -30,8 +30,10 @@ from evalyx.api.auth import (
 )
 
 #: The dev-mode organization header (only honored when AUTH_REQUIRED=0).
-_DEV_ORG_HEADER = "x-dev-organization-id"
-_DEV_ORG_PATTERN = re.compile(r"^org_[A-Za-z0-9]{1,64}$")
+#: ``org_`` prefix plus bounded word characters and hyphens: wide enough
+#: for local names (``org_dev_default``, ``org_beta_e2e``) while still
+#: rejecting spaces, control characters, and injection payloads.
+_DEV_ORG_PATTERN = re.compile(r"^org_[A-Za-z0-9_-]{1,64}$")
 from evalyx.api.schemas.common import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from evalyx.api.services import EvaluationService
 from evalyx.core.config import Settings

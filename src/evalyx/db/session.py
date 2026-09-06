@@ -60,7 +60,7 @@ class DatabaseManager:
             async with self._engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - readiness probe must never raise
             return False
 
     async def dispose(self) -> None:

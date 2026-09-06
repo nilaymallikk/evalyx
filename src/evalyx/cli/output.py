@@ -17,7 +17,9 @@ def supports_unicode() -> bool:
     if os.environ.get("EVALYX_ASCII"):
         return False
     try:
-        "✓✗".encode(sys.stdout.encoding or "ascii")
+        # getattr: under redirected/captured stdout (pipes, test pilots)
+        # ``encoding`` may be missing — fall back to ASCII, never crash.
+        "✓✗".encode(getattr(sys.stdout, "encoding", None) or "ascii")
     except (LookupError, UnicodeEncodeError):
         return False
     return True

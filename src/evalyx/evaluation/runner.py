@@ -340,7 +340,7 @@ class EvaluationRunner:
                 provider_error=type(exc).__name__,
                 failure_category=metrics["failure"]["category"],
             )
-        except Exception as exc:  # provider contract violation must not kill the run
+        except Exception as exc:  # noqa: BLE001 - provider contract violation must not kill the run
             status = CaseStatus.ERROR
             error = f"UnexpectedProviderError: {exc}"
             metrics["provider_error"] = "UnexpectedProviderError"

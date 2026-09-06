@@ -60,9 +60,9 @@ def test_tampered_ciphertext_rejected(encryptor: SecretEncryptor):
 
 def test_wrong_key_rejected():
     other = SecretEncryptor(decode_encryption_key(generate_encryption_key()))
-    envelope = SecretEncryptor(decode_encryption_key(generate_encryption_key())).encrypt(
-        SECRET
-    )
+    envelope = SecretEncryptor(
+        decode_encryption_key(generate_encryption_key())
+    ).encrypt(SECRET)
     with pytest.raises(EncryptionError):
         other.decrypt(envelope)
 
@@ -95,6 +95,18 @@ def test_decode_key_validates_length():
 def test_generate_key_roundtrips():
     key = decode_encryption_key(generate_encryption_key())
     assert len(key) == 32
+
+
+def test_decode_key_accepts_unpadded_token_urlsafe():
+    """The documented generation command (secrets.token_urlsafe(32)) strips
+    ``=`` padding — those keys must decode (Phase 19 release fix)."""
+    import secrets
+
+    raw = decode_encryption_key(secrets.token_urlsafe(32))
+    assert len(raw) == 32
+    padded = base64.urlsafe_b64encode(raw).decode()
+    assert decode_encryption_key(padded) == raw
+    assert decode_encryption_key(padded.rstrip("=")) == raw
 
 
 def test_missing_key_raises_clear_error():

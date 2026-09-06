@@ -25,6 +25,10 @@ from evalyx.llm.errors import (
 
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
+#: Shared default retry policy (``RetryPolicy`` is a frozen dataclass, so a
+#: module-level default is safe and avoids a call in the argument list).
+DEFAULT_OLLAMA_RETRY_POLICY = RetryPolicy(max_retries=1)
+
 
 class OllamaProvider:
     """Async Ollama chat provider (local, optional)."""
@@ -34,7 +38,7 @@ class OllamaProvider:
         *,
         base_url: str = DEFAULT_OLLAMA_BASE_URL,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
-        retry_policy: RetryPolicy = RetryPolicy(max_retries=1),
+        retry_policy: RetryPolicy = DEFAULT_OLLAMA_RETRY_POLICY,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")

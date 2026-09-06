@@ -243,7 +243,11 @@ class EvaluationService:
             application_version_id=request.application_version_id,
             dataset_version_id=request.dataset_version_id,
             agent_model=request.agent_model,
-            judge_model=request.judge_model,
+            # An omitted judge model falls back to the configured project
+            # default: without it the worker cannot run semantic guardrails
+            # and scoring would fail after execution (a completed-but-never-
+            # scored run). Explicit values are never overridden.
+            judge_model=request.judge_model or self._settings.evalyx_judge_model,
             configuration_snapshot=request.configuration_snapshot,
         )
         if self._settings.audit_enabled:

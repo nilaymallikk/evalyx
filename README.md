@@ -46,7 +46,7 @@ REGRESSION DETECTED
                 [hallucination, instruction_following]
 ```
 
-## Status: Phase 18 complete — Security, quotas & production hardening (Phases 1–17 built)
+## Status: `0.9.0b1` Public Beta (Phase 19 — Phases 1–18 built, see `CHANGELOG.md`)
 
 ### Currently implemented
 
@@ -183,6 +183,7 @@ evalyx dataset show <id>                # dataset + versions
 evalyx dataset add-case <id> <version> --name c1 --input '{"prompt":"hi"}'
 
 evalyx eval run --application <id> --dataset-version <id>        --agent-model <model> [--judge-model m] [--wait]
+                                         # --judge-model defaults to the server's EVALYX_JUDGE_MODEL
 evalyx eval list / eval show <run-id> / eval results <run-id> [--failures-only]
 evalyx eval guardrails <run-id>
 evalyx eval reliability <run-id>        # alias: evalyx reliability <run-id>
@@ -214,6 +215,29 @@ stdout is not a TTY.
 
 `evalyx eval run --wait --json` therefore composes safely in CI pipelines:
 exit `0` means the run completed with no quality failures.
+
+## Production deployment (beta)
+
+The reference production deployment is Docker Compose (`Dockerfile` +
+`docker-compose.production.yml` + nginx in `deploy/`). Full operator guide:
+`docs/deployment.md`; pre-flight list: `docs/production-checklist.md`;
+security model: `docs/security.md`.
+
+```bash
+cp .env.production.example .env.production   # fill from your secret store
+docker compose -f docker-compose.production.yml --env-file .env.production build
+docker compose -f docker-compose.production.yml --env-file .env.production run --rm migrate
+docker compose -f docker-compose.production.yml --env-file .env.production up -d
+curl https://<host>/health/ready
+```
+
+Beta essentials: `APP_ENV=production` with `AUTH_REQUIRED=1`, a production
+Clerk instance, `EVALYX_SECRET_KEY`, `EVALYX_ENCRYPTION_KEY` (either padded
+or `secrets.token_urlsafe(32)` output), strong Postgres/Redis passwords, and
+operator-provisioned TLS. Backups are operator-managed
+(`scripts/backup.sh` / `scripts/restore.sh`: `pg_dump -Fc` + SHA-256 —
+keep the encryption key with the backups). Point the CLI at it with
+`evalyx --api-url https://<host> login` (HTTPS, Clerk session token).
 
 ## Architecture
 
@@ -382,9 +406,10 @@ Connection configuration example:
 - Rotation: `PATCH /api/v1/applications/{id}/connection` replaces the
   ciphertext with a newly encrypted value. The old secret is never
   returned and never required. Responses expose only `secret_configured`.
-- The ciphertext format is versioned for future key rotation; rotating the
-  *master key* and re-encrypting existing envelopes is not implemented in
-  this phase (documented limitation).
+- The ciphertext format is versioned for future key rotation; master-key
+  rotation with re-encryption is supported via the Phase 18 workflow
+  (`EVALYX_PREVIOUS_ENCRYPTION_KEYS` + `scripts/reencrypt_credentials.py`
+  `--dry-run`/`--apply` — see `docs/security.md §4`).
 
 ### SSRF and HTTP safety
 
@@ -785,10 +810,16 @@ Endpoint inventory:
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/applications` | register an application (201; duplicate name → 409) |
+| GET | `/api/v1/applications` | list applications (paginated) |
 | GET | `/api/v1/me` | caller identity + organizations (Phase 16, CLI auth) |
 | GET | `/api/v1/applications/{id}` | retrieve an application |
+| PATCH | `/api/v1/applications/{id}` | rename/describe an application |
+| DELETE | `/api/v1/applications/{id}` | delete an application and its versions |
+| PATCH | `/api/v1/applications/{id}/connection` | rotate the encrypted credential (write-only) |
+| POST | `/api/v1/applications/{id}/test` | connection test against the stored endpoint (generic apps) |
 | GET | `/api/v1/applications/{id}/versions` | list immutable versions |
-| POST | `/api/v1/applications/{id}/versions` | create a version (409 on duplicate label) |
+| POST | `/api/v1/applications/{id}/versions` | create a version (409 on duplicate label; reference apps may omit `connection`) |
+| GET | `/api/v1/applications/{id}/versions/{version_id}` | retrieve one version |
 | POST | `/api/v1/datasets` | create a dataset |
 | GET | `/api/v1/datasets` | list datasets (paginated, Phase 16) |
 | GET | `/api/v1/datasets/{id}` | retrieve a dataset |
@@ -805,6 +836,7 @@ Endpoint inventory:
 | GET | `/api/v1/evaluations/{run_id}/regressions` | comparisons involving the run |
 | POST | `/api/v1/regressions` | compare two completed runs (see Phase 8) |
 | GET | `/api/v1/regressions/{comparison_id}` | retrieve a persisted report |
+| GET | `/api/v1/metrics` | authenticated operational snapshot (never public) |
 
 Semantics and conventions:
 
@@ -820,6 +852,10 @@ Semantics and conventions:
 - **Submission idempotency**: deliberately not idempotent — a retried HTTP
   request creates a new run. Treat any 2xx as success; a distributed
   idempotency-key mechanism is explicitly deferred (schema change).
+- **Judge-model default**: omitting `judge_model` applies the server's
+  `EVALYX_JUDGE_MODEL` (free default). Every submitted run is therefore
+  scorable — an omitted judge can never produce a completed-but-never-scored
+  run. Explicit values are never overridden.
 - **PostgreSQL is authoritative**: run/case/guardrail state comes from
   PostgreSQL; Redis holds only operational Celery task state.
 - **Errors**: one envelope, `{"error": {"code", "message"}}`; mapping —
@@ -884,13 +920,17 @@ curl -s -X POST http://localhost:8000/api/v1/regressions \
 # 200 with {"result": "regression_detected" | "no_regression" | "not_comparable", ...}
 ```
 
-Security limitations (explicit, intentional for this phase):
+Security posture (Phases 14/18 — see `docs/security.md` for the full model):
 
-- **Authentication/authorization is not implemented yet.** The API is for
-  local development and portfolio demonstration; do not expose it to
-  untrusted networks. JWT/OAuth/API-key auth and RBAC are future
-  hardening.
-- No rate limiting and no CORS (permissive origins are not enabled).
+- **Authentication/authorization are implemented.** Clerk session tokens
+  (`Authorization: Bearer …`, verified locally via JWKS), Clerk
+  Organizations as tenant boundaries, role-based guards, uniform 404s
+  across tenants. `AUTH_REQUIRED=0` is local-dev only and refused in
+  production.
+- Rate limiting is Redis-backed and shared across replicas (120 req/min,
+  20 eval submissions/min, 10 connection tests/min by default), plus
+  per-organization quotas (5 concurrent evaluations, 100/day, resource
+  caps). CORS stays disabled unless explicit origins are configured.
 - Secrets are never accepted in request bodies; error responses never
   include stack traces, SQL, filesystem paths, or provider payloads;
   guardrail metadata contains categories/counts, never raw PII matches.

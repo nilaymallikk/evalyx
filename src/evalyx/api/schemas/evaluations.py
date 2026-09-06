@@ -31,7 +31,10 @@ class EvaluationCreate(BaseModel):
     judge_model: str | None = Field(
         default=None,
         max_length=255,
-        description="Optional judge model identifier (LLM-as-a-judge scoring).",
+        description=(
+            "Optional judge model identifier (LLM-as-a-judge scoring). "
+            "When omitted, the server default (EVALYX_JUDGE_MODEL) applies."
+        ),
     )
     configuration_snapshot: dict = Field(
         default_factory=dict,

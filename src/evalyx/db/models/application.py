@@ -37,7 +37,7 @@ class Application(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     #: ``"mlgpt"`` (the Evalyx reference demo target; the historical default
     #: so pre-Phase-15 rows and the demo keep working unchanged).
     connection_type: Mapped[str] = mapped_column(
-        String(32), default="mlgpt", server_default="mlgpt", nullable=False
+        String(32), default="mlgpt", server_default="mlgpt", nullable=False, index=True
     )
     #: Encrypted application credential (Phase 15). The plaintext never
     #: touches the database, logs, API responses, or task arguments — only

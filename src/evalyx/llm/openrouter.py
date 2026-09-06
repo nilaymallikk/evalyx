@@ -31,6 +31,10 @@ from evalyx.llm.errors import (
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+#: Shared default retry policy (``RetryPolicy`` is a frozen dataclass, so a
+#: module-level default is safe and avoids a call in the argument list).
+DEFAULT_OPENROUTER_RETRY_POLICY = RetryPolicy()
+
 
 class OpenRouterProvider:
     """Async OpenRouter chat-completion provider."""
@@ -41,7 +45,7 @@ class OpenRouterProvider:
         *,
         base_url: str = DEFAULT_OPENROUTER_BASE_URL,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
-        retry_policy: RetryPolicy = RetryPolicy(),
+        retry_policy: RetryPolicy = DEFAULT_OPENROUTER_RETRY_POLICY,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         api_key_value = api_key.get_secret_value()

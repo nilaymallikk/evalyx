@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
+from tenant_helpers import integration_organization_id
 
 from evalyx.db.models import CaseStatus, RunStatus
 from evalyx.db.repositories import (
@@ -18,11 +19,8 @@ from evalyx.db.repositories import (
 )
 from evalyx.db.session import DatabaseManager
 from evalyx.evaluation import EvaluationRunner, RunnerError
-from evalyx.llm.base import LLMProvider, LLMResponse, TokenUsage
+from evalyx.llm.base import LLMResponse, TokenUsage
 from evalyx.llm.errors import LLMRateLimitError, LLMTimeoutError
-from evalyx.db.session import DatabaseManager
-
-from tenant_helpers import integration_organization_id
 
 pytestmark = pytest.mark.integration
 
@@ -434,7 +432,7 @@ async def test_dataset_version_is_pinned_not_latest(clean_db):
 
 
 async def test_duplicate_execution_does_not_duplicate_results(clean_db):
-    _, run_id, _, case_ids = await seed(clean_db, case_inputs=["a", "b", "c"])
+    _, run_id, _, _case_ids = await seed(clean_db, case_inputs=["a", "b", "c"])
     provider = FakeProvider()
     runner = EvaluationRunner(provider, clean_db.session_factory)
 

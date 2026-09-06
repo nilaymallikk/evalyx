@@ -60,7 +60,11 @@ ApiUrlOpt = Annotated[
 ]
 OrgOpt = Annotated[
     str | None,
-    typer.Option("--org", envvar="EVALYX_ORG", help="Organization id (dev mode)."),
+    typer.Option(
+        "--org",
+        envvar="EVALYX_ORG",
+        help="Organization id (dev mode): org_<letters/digits/_/->, e.g. org_beta_e2e.",
+    ),
 ]
 
 
@@ -481,7 +485,11 @@ def app_version(
     ctx: typer.Context,
     application_id: str,
     version: str = typer.Argument(..., help="Version label."),
-    endpoint: str = typer.Option(..., help="Application endpoint URL (https)."),
+    endpoint: str | None = typer.Option(
+        None,
+        help="Application endpoint URL (https). Required for generic http apps; "
+        "omit for reference (mlgpt) apps to create a metadata-only version.",
+    ),
     method: str = typer.Option("POST", help="HTTP method (POST/GET)."),
     auth: str = typer.Option("none", help="Auth mode: none | bearer | api_key."),
     input_field: str = typer.Option("input", help="Request field receiving the case input."),
@@ -491,17 +499,31 @@ def app_version(
 ) -> None:
     """Create an immutable application version with a connection configuration."""
     context = ctx.ensure_object(Context) if ctx.obj is None else ctx.obj
-    connection = {
-        "endpoint": endpoint,
-        "method": method.upper(),
-        "auth": {"type": auth},
-        "request": {"mode": "field", "input_field": input_field},
-        "response_path": response_path,
-        "timeout_seconds": timeout_seconds,
-    }
 
     def action() -> None:
-        created = context.require_token().applications_create_version(
+        client = context.require_token()
+        connection: dict | None = None
+        if endpoint is not None:
+            connection = {
+                "endpoint": endpoint,
+                "method": method.upper(),
+                "auth": {"type": auth},
+                "request": {"mode": "field", "input_field": input_field},
+                "response_path": response_path,
+                "timeout_seconds": timeout_seconds,
+            }
+        else:
+            # Metadata-only versions are valid for reference (mlgpt) apps
+            # whose connection is server-configured; generic http apps need
+            # an endpoint — fail fast instead of creating a version the
+            # worker cannot execute.
+            application = client.applications_get(application_id)
+            if application.get("connection_type", "http") == "http":
+                raise err.UsageError(
+                    "Generic http applications require --endpoint.",
+                    hint="evalyx app version <id> <label> --endpoint https://...",
+                )
+        created = client.applications_create_version(
             application_id, version, connection=connection
         )
         if json_mode or context.json_mode:
@@ -624,7 +646,9 @@ def eval_run(
     application: str = typer.Option(..., help="Application id."),
     dataset_version: str = typer.Option(..., help="Dataset version id."),
     agent_model: str = typer.Option(..., "--agent-model", help="Model identifier for the agent under test."),
-    judge_model: str | None = typer.Option(None, "--judge-model"),
+    judge_model: str | None = typer.Option(
+        None, "--judge-model", help="Judge model (default: server EVALYX_JUDGE_MODEL)."
+    ),
     wait: bool = typer.Option(False, "--wait", help="Poll until the run finishes (bounded)."),
     json_mode: JsonOpt = False,
 ) -> None:

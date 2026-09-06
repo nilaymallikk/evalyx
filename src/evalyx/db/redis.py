@@ -21,5 +21,5 @@ async def check_redis(client: Redis) -> bool:
     """Return True when Redis answers PING."""
     try:
         return bool(await client.ping())
-    except Exception:
+    except Exception:  # noqa: BLE001 - readiness probe must never raise
         return False

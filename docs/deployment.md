@@ -81,8 +81,13 @@ token audiences. Rotate by updating the secret store and recreating the
 versioned envelope). It is **never generated at startup** — auto-generation
 would orphan existing ciphertext. Missing/invalid key fails startup with a
 named error. Store it where the database backups are documented (losing it
-makes stored credentials undecryptable); rotation of the master key with
-re-encryption is not implemented (documented limitation — same as Phase 15).
+makes stored credentials undecryptable). Both padded and unpadded urlsafe
+base64 forms are accepted, so `python -c "import secrets;
+print(secrets.token_urlsafe(32))"` output works directly. Master-key
+rotation: deploy the new key as `EVALYX_ENCRYPTION_KEY` with the old key in
+`EVALYX_PREVIOUS_ENCRYPTION_KEYS`, then `scripts/reencrypt_credentials.py
+--dry-run` / `--apply` (see `docs/security.md §4`); remove the old key
+after the dry-run reports zero remaining.
 
 ## 5. Build / start / migrate
 

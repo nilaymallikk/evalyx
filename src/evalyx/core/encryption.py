@@ -62,11 +62,15 @@ class EncryptionError(Exception):
 def decode_encryption_key(key_value: str) -> bytes:
     """Decode and validate a urlsafe base64-encoded 32-byte key.
 
-    Raises :class:`ValueError` (with no key material in the message) when
-    the value is not decodable or has the wrong length.
+    Accepts both padded and unpadded base64: ``secrets.token_urlsafe(32)``
+    (the documented generation command) strips ``=`` padding, while
+    :func:`generate_encryption_key` keeps it. Raises :class:`ValueError`
+    (with no key material in the message) when the value is not decodable
+    or has the wrong length.
     """
+    padded = key_value.strip() + "=" * (-len(key_value.strip()) % 4)
     try:
-        key = base64.urlsafe_b64decode(key_value.encode("ascii"))
+        key = base64.urlsafe_b64decode(padded.encode("ascii"))
     except (binascii.Error, ValueError, UnicodeEncodeError):
         raise ValueError("encryption key is not valid urlsafe base64.") from None
     if len(key) != KEY_BYTES:
