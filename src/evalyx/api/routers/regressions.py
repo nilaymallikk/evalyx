@@ -25,7 +25,7 @@ from evalyx.evaluation.regression.service import RegressionService
 
 router = APIRouter(prefix="/regressions", tags=["regressions"])
 
-#: Authenticated + tenant-resolved dependency (Clerk org → local workspace).
+#: Workspace-resolved dependency (single local workspace).
 TenantContext = Annotated[tuple[AuthContext, Organization], Depends(require_organization)]
 
 

@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import require_organization
 from evalyx.core.config import Settings
 from evalyx.db.models import RunStatus
@@ -27,7 +27,7 @@ pytestmark = pytest.mark.integration
 
 
 def _hermetic_settings(**overrides):
-    defaults = {"evalyx_secret_key": "placeholder", "auth_required": False}
+    defaults = {"evalyx_secret_key": "placeholder"}
     return Settings(_env_file=None, **{**defaults, **overrides})
 
 
@@ -99,11 +99,7 @@ class TestPostgresOutage:
             async with clean_db.session() as s:
                 organization = await resolve_row(s, "org_outage")
             return (
-                AuthContext(
-                    clerk_user_id="u",
-                    clerk_organization_id="org_outage",
-                    organization_role=OrganizationRole.ADMIN,
-                ),
+                AuthContext(),
                 organization,
             )
 
@@ -173,11 +169,7 @@ class TestRecovery:
             async with clean_db.session() as s:
                 organization = await resolve_row(s, org)
             return (
-                AuthContext(
-                    clerk_user_id="recovery-user",
-                    clerk_organization_id=org,
-                    organization_role=OrganizationRole.ADMIN,
-                ),
+                AuthContext(),
                 organization,
             )
 

@@ -13,7 +13,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, AuthenticationError, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import require_organization
 from evalyx.core.config import Settings
 from evalyx.core.encryption import (
@@ -50,11 +50,7 @@ def _tenant_override(db: DatabaseManager, clerk_org_id: str):
         async with db.session() as session:
             organization = await resolve_row(session, clerk_org_id)
         return (
-            AuthContext(
-                clerk_user_id=f"user_{clerk_org_id}",
-                clerk_organization_id=clerk_org_id,
-                organization_role=OrganizationRole.ADMIN,
-            ),
+            AuthContext(),
             organization,
         )
 
@@ -77,7 +73,6 @@ async def clean_db(db_manager: DatabaseManager):
 async def _client(db: DatabaseManager, clerk_org_id: str | None) -> AsyncClient:
     # Isolated rate-limit namespace per client (shared Redis by design).
     settings = Settings(
-        auth_required=False,
         rate_limit_redis_prefix=f"evalyx:test-rl:{uuid.uuid4().hex[:12]}",
     )
     app = create_app(settings, database=db)
@@ -85,23 +80,6 @@ async def _client(db: DatabaseManager, clerk_org_id: str | None) -> AsyncClient:
         app.dependency_overrides[require_organization] = _tenant_override(
             db, clerk_org_id
         )
-    transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://testserver")
-
-
-async def _unauthenticated_client(db: DatabaseManager) -> AsyncClient:
-    """A client whose verifier rejects every request (401 behavior)."""
-
-    class _RejectingVerifier:
-        async def verify(self, request) -> AuthContext:
-            raise AuthenticationError("Authentication failed.")
-
-    settings = Settings(
-        auth_required=False,
-        rate_limit_redis_prefix=f"evalyx:test-rl:{uuid.uuid4().hex[:12]}",
-    )
-    app = create_app(settings, database=db)
-    app.state.token_verifier = _RejectingVerifier()
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://testserver")
 
@@ -126,17 +104,6 @@ async def _create_http_application(
         )
         assert version_response.status_code == 201, version_response.text
     return application
-
-
-# -- unauthenticated access ------------------------------------------------------
-
-
-async def test_unauthenticated_creation_is_401(clean_db):
-    client = await _unauthenticated_client(clean_db)
-    response = await client.post(
-        "/api/v1/applications", json={"name": "nope", "connection_type": "http"}
-    )
-    assert response.status_code == 401
 
 
 # -- CRUD ---------------------------------------------------------------------
@@ -365,7 +332,7 @@ async def test_plaintext_secret_never_persisted(clean_db, db_manager):
         assert SECRET_A not in (row.secret_metadata or {})
         # The envelope decrypts back to the original value (proves the stored
         # ciphertext is the credential, just never in plaintext).
-        settings = Settings(auth_required=False)
+        settings = Settings()
         encryptor = SecretEncryptor.from_settings(settings)
         assert encryptor.decrypt(row.encrypted_secret) == SECRET_A
 
@@ -393,7 +360,7 @@ async def test_secret_rotation_replaces_ciphertext(clean_db, db_manager):
         assert row.encrypted_secret is not None
         assert SECRET_A not in (row.encrypted_secret or "")
         assert SECRET_B not in (row.encrypted_secret or "")
-        settings = Settings(auth_required=False)
+        settings = Settings()
         encryptor = SecretEncryptor.from_settings(settings)
         assert encryptor.decrypt(row.encrypted_secret) == SECRET_B
 
@@ -523,7 +490,7 @@ async def test_resolve_run_target_builds_http_target(clean_db, db_manager):
         )
         run_id = run.id
 
-    settings = Settings(auth_required=False)
+    settings = Settings()
     async with db_manager.session() as session:
         from evalyx.db.repositories import EvaluationRepository as EvalRepo
 

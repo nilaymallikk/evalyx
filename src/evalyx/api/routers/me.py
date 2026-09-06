@@ -1,20 +1,12 @@
-"""Caller identity endpoint (Phase 16): ``GET /api/v1/me``.
+"""Local workspace endpoint: ``GET /api/v1/me``.
 
-A single authenticated endpoint answering "who am I, which organizations
-can I use" — the CLI's ``evalyx whoami`` and ``evalyx login`` consume it.
-Identity always comes from the verified token; the endpoint adds only the
-Clerk-Frontend-API lookups (email address, organization list) that a
-session token payload does not carry. Safe fields only — no token
-contents, no Clerk secrets, no raw membership payloads.
+Answers "which workspace is this" — consumed by the CLI's ``evalyx
+whoami``. No login required. Display information only.
 """
 
-from typing import Annotated
+from fastapi import APIRouter
 
-from fastapi import APIRouter, Depends
-
-from evalyx.api.auth import AuthContext, TokenVerifier
-from evalyx.api.dependencies import get_token_verifier, require_authenticated_user
-from evalyx.api.schemas.me import MeResponse, OrganizationSummary
+from evalyx.api.schemas.me import MeResponse
 
 router = APIRouter(tags=["me"])
 
@@ -22,22 +14,12 @@ router = APIRouter(tags=["me"])
 @router.get(
     "/me",
     response_model=MeResponse,
-    summary="Describe the authenticated caller",
-    description=(
-        "Identity from the verified Clerk session token plus the caller's "
-        "Clerk organizations and the active organization's role. Contains "
-        "only display information (email, org names/roles) — never tokens "
-        "or secrets."
-    ),
-    responses={401: {"description": "Authentication failed."}},
+    summary="Describe the local workspace",
 )
-async def get_me(
-    auth: Annotated[AuthContext, Depends(require_authenticated_user)],
-    verifier: Annotated[TokenVerifier, Depends(get_token_verifier)],
-) -> MeResponse:
+async def get_me() -> MeResponse:
     from evalyx.api.me import describe_caller
 
-    return await describe_caller(auth, verifier)
+    return await describe_caller()
 
 
-__all__ = ["OrganizationSummary", "router"]
+__all__ = ["router"]

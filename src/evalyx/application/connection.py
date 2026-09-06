@@ -30,7 +30,7 @@ Security rules enforced at validation time:
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from evalyx.application.ssrf import (
     FORBIDDEN_HEADER_NAMES,
@@ -196,9 +196,15 @@ class ConnectionConfig(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=5)
 
     @model_validator(mode="after")
-    def _validate(self) -> ConnectionConfig:
+    def _validate(self, info: ValidationInfo) -> ConnectionConfig:
+        context = info.context or {}
+        allow_private = bool(
+            context.get("allow_private_endpoints", False)
+            if isinstance(context, dict)
+            else False
+        )
         try:
-            assert_static_url_allowed(self.endpoint)
+            assert_static_url_allowed(self.endpoint, allow_private=allow_private)
         except SSRFViolationError as exc:
             raise ConnectionConfigError(str(exc)) from None
         if not RESPONSE_PATH_PATTERN.fullmatch(self.response_path):

@@ -1,10 +1,10 @@
-"""Phase 18 tenant-isolation matrix (live PostgreSQL).
+"""Phase 18 workspace-isolation matrix (live PostgreSQL).
 
-Every tenant-owned resource — applications, versions, secrets, connection
-tests, datasets, versions, cases, runs, results, guardrails, reliability,
-regressions — is probed cross-tenant and must read as missing (uniform
-404, never another tenant's data). Forged tenant identity in request bodies
-is ignored, and unauthenticated callers get 401s without disclosure.
+Every workspace-owned resource — applications, versions, secrets,
+connection tests, datasets, versions, cases, runs, results, guardrails,
+reliability, regressions — is probed from a foreign workspace and must
+read as missing (uniform 404, never another workspace's data). Forged
+tenant identity in request bodies is ignored.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import require_organization
 from evalyx.core.config import Settings
 from evalyx.db.session import DatabaseManager
@@ -31,11 +31,7 @@ async def _client(db: DatabaseManager, settings: Settings, clerk_org_id: str | N
 
     app = create_app(settings, database=db)
     if clerk_org_id is not None:
-        auth = AuthContext(
-            clerk_user_id=f"user-{clerk_org_id}",
-            clerk_organization_id=clerk_org_id,
-            organization_role=OrganizationRole.MEMBER,
-        )
+        auth = AuthContext()
 
         async def _resolve():
             from evalyx.db.tenancy import require_organization as resolve_row
@@ -182,33 +178,6 @@ async def test_forged_tenant_fields_ignored(
             },
         )
         assert response.status_code == 404
-
-
-async def test_unauthenticated_gets_401_without_disclosure(
-    clean_db: DatabaseManager, settings: Settings
-):
-    from evalyx.api.auth import AuthenticationError
-
-    app = create_app(settings, database=clean_db)
-
-    class _RejectingVerifier:
-        async def verify(self, request) -> AuthContext:
-            raise AuthenticationError("Authentication failed.")
-
-    app.state.token_verifier = _RejectingVerifier()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        for path in (
-            "/api/v1/applications",
-            "/api/v1/datasets",
-            "/api/v1/evaluations",
-            "/api/v1/metrics",
-        ):
-            response = await client.get(path)
-            assert response.status_code == 401, path
-            assert "error" in response.json()
-        # Health stays public by design.
-        assert (await client.get("/health")).status_code == 200
 
 
 async def test_metrics_requires_auth_and_labels_stay_bounded(

@@ -2,8 +2,6 @@
 
 Covers the beta usability fixes without touching production behavior:
 
-- dev-mode organization header accepts underscores/hyphens (beta orgs like
-  ``org_beta_e2e``) while still rejecting injection payloads;
 - ``evalyx app version`` creates a metadata-only version for reference
   (mlgpt) apps without ``--endpoint``, and fails fast with a usage error
   for generic http apps;
@@ -14,8 +12,6 @@ Covers the beta usability fixes without touching production behavior:
 import pytest
 from typer.testing import CliRunner
 
-from evalyx.api.dependencies import DevOrganizationContext
-from evalyx.cli import auth as cli_auth
 from evalyx.cli import errors as cli_errors
 from evalyx.cli.client import EvalyxClient
 from evalyx.cli.config import Config
@@ -23,39 +19,6 @@ from evalyx.cli.main import app
 from evalyx.cli.tui.app import EvalyxTUI
 
 runner = CliRunner()
-
-
-class _FakeRequest:
-    def __init__(self, headers: dict[str, str]) -> None:
-        self.headers = {k.lower(): v for k, v in headers.items()}
-
-
-@pytest.mark.asyncio
-async def test_dev_org_accepts_beta_style_names():
-    """Underscores/hyphens are usable in local org names (Phase 19)."""
-    for good in ("org_beta_e2e", "org_dev_default", "org_beta-1", "org_abc123"):
-        context = await DevOrganizationContext().verify(
-            _FakeRequest({"X-Dev-Organization-Id": good})
-        )
-        assert context.clerk_organization_id == good, good
-
-
-@pytest.mark.asyncio
-async def test_dev_org_still_rejects_malicious_values():
-    """The widened charset does not admit injection payloads."""
-    for bad in (
-        "",
-        "drop table",
-        "org_$evil",
-        "org_a;b",
-        "org_x\nInjected: yes",
-        "other-org",
-        "org_" + "x" * 200,
-    ):
-        context = await DevOrganizationContext().verify(
-            _FakeRequest({"X-Dev-Organization-Id": bad})
-        )
-        assert context.clerk_organization_id is None, bad
 
 
 # -- `evalyx app version` without --endpoint ---------------------------------------
@@ -101,8 +64,7 @@ def _invoke_version(monkeypatch: pytest.MonkeyPatch, fake: _VersionAPI, *args: s
             )
         ),
     )
-    # Dev-mode auth: an org preference is enough (no token needed).
-    monkeypatch.setenv("EVALYX_ORG", "org_beta_e2e")
+    # No login needed: plain requests against the configured API URL.
     monkeypatch.delenv("EVALYX_API_URL", raising=False)
     return runner.invoke(app, ["app", "version", *args])
 
@@ -141,7 +103,6 @@ def test_app_version_with_endpoint_still_sends_connection(monkeypatch):
 @pytest.mark.asyncio
 async def test_tui_boots_and_navigates_all_views(monkeypatch):
     """Every TUI view renders from stubbed client data (no network)."""
-    monkeypatch.setattr(cli_auth, "load_token", lambda: None)
     monkeypatch.setattr(
         EvalyxClient,
         "applications_list",
@@ -178,7 +139,7 @@ async def test_tui_boots_and_navigates_all_views(monkeypatch):
             "total": 1,
         },
     )
-    tui = EvalyxTUI(Config(api_url="http://mock", org="org_beta_e2e"))
+    tui = EvalyxTUI(Config(api_url="http://mock"))
     statuses: list[str] = []
     tui._set_status = statuses.append  # type: ignore[method-assign]
     async with tui.run_test() as pilot:

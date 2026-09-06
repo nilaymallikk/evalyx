@@ -41,7 +41,6 @@ def settings() -> Settings:
     Phase 18 rate-limit tests with a shared prefix.
     """
     return Settings(
-        auth_required=False,
         rate_limit_redis_prefix=f"evalyx:test-rl:{uuid.uuid4().hex[:12]}",
     )
 

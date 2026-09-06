@@ -64,10 +64,21 @@ class PinningAsyncHTTPTransport(httpx.AsyncHTTPTransport):
         self,
         *args: Any,
         resolver: Resolver | None = None,
+        allow_private_endpoints: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self._resolver = resolver or resolve_public_addresses
+        self._allow_private = allow_private_endpoints
+        if resolver is not None:
+            self._resolver = resolver
+        else:
+
+            async def _default_resolver(hostname: str, port: int) -> list[str]:
+                return await resolve_public_addresses(
+                    hostname, port, allow_private=self._allow_private
+                )
+
+            self._resolver = _default_resolver
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         url = request.url
@@ -75,7 +86,7 @@ class PinningAsyncHTTPTransport(httpx.AsyncHTTPTransport):
         if scheme not in _PINNED_SCHEMES or not url.host:
             raise SSRFViolationError("Application endpoint must use http or https.")
         # Cheap static boundary first (scheme/userinfo/fragment/port rules).
-        assert_static_url_allowed(str(url))
+        assert_static_url_allowed(str(url), allow_private=self._allow_private)
         host = url.host
         port = url.port or _DEFAULT_PORTS[scheme]
         if _is_literal_ip(host):

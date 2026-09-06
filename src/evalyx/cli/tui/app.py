@@ -16,7 +16,6 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, Label, Static
 
-from evalyx.cli.auth import load_token
 from evalyx.cli.client import EvalyxClient
 from evalyx.cli.config import Config
 from evalyx.cli.errors import EvalyxCLIError
@@ -54,8 +53,7 @@ class EvalyxTUI(App[None]):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.config = config
-        token = load_token()
-        self.client = EvalyxClient(config, token=token)
+        self.client = EvalyxClient(config)
         self._view_stack: list[str] = ["dashboard"]
 
     # -- layout ----------------------------------------------------------------
@@ -120,7 +118,7 @@ class EvalyxTUI(App[None]):
             self._set_status(f"Error: {exc}")
             self._set_detail(
                 f"{exc}\n\n{exc.hint or ''}".strip()
-                + "\n\nStart the API and log in:\n  evalyx login\n  evalyx org use <org-id>"
+                + "\n\nIs the API running? Start it with:\n  uv run python main.py"
             )
         except Exception as exc:  # noqa: BLE001 — the TUI never crashes on refresh
             self._set_status(f"Unexpected error: {type(exc).__name__}")

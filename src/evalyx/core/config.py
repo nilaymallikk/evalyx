@@ -120,19 +120,17 @@ class Settings(BaseSettings):
     # its documented default port). Server-side only — never sent to clients.
     mlgpt_base_url: str = "http://127.0.0.1:8001"
 
-    # Clerk authentication (Phase 14). Clerk owns identity + organizations;
-    # Evalyx owns the domain data and tenant scoping. The secret key is a
-    # SecretStr (never logged/repr'd); the JWKS URL enables local public-key
-    # verification of session tokens instead of Clerk API round-trips.
-    # When clerk_jwks_url is empty, authentication is disabled (local dev
-    # without Clerk) — auth_required below makes that explicit.
-    clerk_secret_key: SecretStr = SecretStr("")
-    clerk_jwks_url: str = ""
-    clerk_authorized_parties: str = ""
+    #: Local development escape hatch for evaluating apps running on the
+    #: same machine (localhost / private IPs). Default False: generic HTTP
+    #: applications must use public endpoints (SSRF protection). Refused in
+    #: production. Even when enabled, link-local (cloud metadata),
+    #: multicast, unspecified, and reserved addresses stay blocked, and
+    #: userinfo/fragments/non-HTTP schemes are still rejected.
+    evalyx_allow_private_endpoints: bool = False
 
-    #: Master switch for API authentication. True in production; may be
-    #: disabled in local development when Clerk is not configured.
-    auth_required: bool = True
+    # Local-first: there are no user accounts and no external
+    # identity provider. The API serves a single local workspace; every
+    # request acts as the local operator.
 
     # Application credential encryption (Phase 15). urlsafe base64 of a
     # 32-byte AES-GCM key (python -c "import secrets, os; \
@@ -205,16 +203,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_safety(self) -> Settings:
-        """Production may never run with authentication or encryption off."""
-        if self.app_env == "production" and not self.auth_required:
-            raise ValueError(
-                "AUTH_REQUIRED cannot be disabled when APP_ENV=production. "
-                "Every deployment must authenticate requests."
-            )
+        """Production may never run with encryption off or SSRF relaxed."""
         if self.app_env == "production" and self.evalyx_encryption_key.get_secret_value().strip() == "":
             raise ValueError(
                 "EVALYX_ENCRYPTION_KEY must be set when APP_ENV=production "
                 "(application credentials are encrypted at rest)."
+            )
+        if self.app_env == "production" and self.evalyx_allow_private_endpoints:
+            raise ValueError(
+                "EVALYX_ALLOW_PRIVATE_ENDPOINTS cannot be enabled when "
+                "APP_ENV=production."
             )
         return self
 
@@ -245,22 +243,6 @@ class Settings(BaseSettings):
                     "EVALYX_PREVIOUS_ENCRYPTION_KEYS must be comma-separated "
                     "urlsafe base64-encoded 32-byte keys."
                 ) from None
-        return self
-
-    @model_validator(mode="after")
-    def _validate_clerk_settings(self) -> Settings:
-        """Clerk must be fully configured when authentication is required."""
-        if self.auth_required and self.clerk_jwks_url.strip() == "":
-            raise ValueError(
-                "Clerk configuration missing: AUTH_REQUIRED=1 requires "
-                "CLERK_JWKS_URL (Clerk instance's .well-known/jwks.json URL). "
-                "To run without Clerk locally, set AUTH_REQUIRED=0."
-            )
-        if self.auth_required and self.clerk_secret_key.get_secret_value().strip() == "":
-            raise ValueError(
-                "Clerk configuration missing: AUTH_REQUIRED=1 requires "
-                "CLERK_SECRET_KEY."
-            )
         return self
 
     @model_validator(mode="after")

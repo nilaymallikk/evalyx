@@ -15,7 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select, text
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import require_organization
 from evalyx.core.config import Settings
 from evalyx.db.models import Organization
@@ -36,11 +36,7 @@ async def _api(db: DatabaseManager, settings: Settings):
         async with db.session() as s:
             organization = await resolve_row(s, ORG)
         return (
-            AuthContext(
-                clerk_user_id="audit-user",
-                clerk_organization_id=ORG,
-                organization_role=OrganizationRole.ADMIN,
-            ),
+            AuthContext(),
             organization,
         )
 
@@ -90,7 +86,7 @@ async def test_mutations_leave_audit_trail(clean_db: DatabaseManager, settings: 
     }
     created_event = by_action["application.create"][0]
     assert created_event.result == "allowed"
-    assert created_event.clerk_user_id == "audit-user"
+    assert created_event.clerk_user_id == "local"
     assert created_event.organization_id is not None
     assert created_event.request_id  # correlated with the HTTP request
     assert isinstance(created_event.created_at, datetime)
@@ -185,32 +181,6 @@ async def test_quota_denial_audited(
     assert event.result == "denied"
     assert event.resource_id == "applications"
     assert event.details.get("limit") == 1
-
-
-async def test_organization_required_denial_audited(
-    clean_db: DatabaseManager, settings: Settings
-):
-    """Authenticated user without an active org → 403 + durable audit row."""
-    from evalyx.api.dependencies import require_authenticated_user
-
-    app = create_app(settings, database=clean_db)
-    app.dependency_overrides[require_authenticated_user] = lambda: AuthContext(
-        clerk_user_id="orgless-user",
-        clerk_organization_id=None,
-        organization_role=None,
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-        response = await client.get("/api/v1/applications")
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "organization_required"
-
-    events = await _rows(clean_db, "auth.organization_required")
-    assert len(events) == 1
-    (event,) = events
-    assert event.result == "denied"
-    assert event.clerk_user_id == "orgless-user"
-    assert event.organization_id is None
 
 
 async def test_retention_cleanup_deletes_only_expired(

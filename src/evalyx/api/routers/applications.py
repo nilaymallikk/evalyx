@@ -124,7 +124,7 @@ async def create_application(
     await quotas.admit_application_create(
         session,
         organization_id=organization.id,
-        clerk_user_id=auth.clerk_user_id,
+        clerk_user_id=auth.user_id,
     )
     encrypted_secret = None
     secret_metadata = None
@@ -149,7 +149,7 @@ async def create_application(
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=APPLICATION_CREATE,
             resource_type="application",
             resource_id=application.id,
@@ -225,7 +225,7 @@ async def update_application(
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=APPLICATION_UPDATE,
             resource_type="application",
             resource_id=application.id,
@@ -262,7 +262,7 @@ async def delete_application(
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=APPLICATION_DELETE,
             resource_type="application",
             resource_id=application_id,
@@ -306,7 +306,7 @@ async def rotate_application_secret(
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=APPLICATION_SECRET_ROTATE,
             resource_type="application",
             resource_id=application.id,
@@ -424,13 +424,15 @@ async def create_application_version(
         version=payload.version,
         description=payload.description,
         configuration=payload.sanitized_configuration(),
-        connection=payload.validated_connection(),
+        connection=payload.validated_connection(
+            allow_private_endpoints=settings.evalyx_allow_private_endpoints
+        ),
     )
     if settings.audit_enabled:
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=APPLICATION_VERSION_CREATE,
             resource_type="application_version",
             resource_id=version.id,
@@ -471,7 +473,7 @@ async def test_application_connection(
     audit_event_id = await quotas.admit_connection_test(
         session,
         organization_id=organization.id,
-        clerk_user_id=auth.clerk_user_id,
+        clerk_user_id=auth.user_id,
     )
     target = await _build_test_target(
         session, repository, application, payload.version_id, settings

@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import require_organization
 from evalyx.core.config import Settings
 from evalyx.db.models import EvaluationRun, Organization, RunStatus
@@ -39,11 +39,7 @@ async def _api(db: DatabaseManager, settings: Settings, clerk_org_id: str):
         async with db.session() as s:
             organization = await resolve_row(s, clerk_org_id)
         return (
-            AuthContext(
-                clerk_user_id="quota-user",
-                clerk_organization_id=clerk_org_id,
-                organization_role=OrganizationRole.ADMIN,
-            ),
+            AuthContext(),
             organization,
         )
 

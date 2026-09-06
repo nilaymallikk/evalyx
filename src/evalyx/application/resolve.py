@@ -54,7 +54,12 @@ def build_http_target(
             category="unknown",
         )
     try:
-        connection = ConnectionConfig.model_validate(version.connection)
+        connection = ConnectionConfig.model_validate(
+            version.connection,
+            context={
+                "allow_private_endpoints": settings.evalyx_allow_private_endpoints
+            },
+        )
     except Exception as exc:
         raise ApplicationInvocationError(
             "Application version connection configuration is invalid.",
@@ -79,6 +84,7 @@ def build_http_target(
         connection,
         secret=secret,
         application_name=application_name or application.name,
+        allow_private_endpoints=settings.evalyx_allow_private_endpoints,
     )
 
 

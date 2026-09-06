@@ -84,6 +84,7 @@ class HTTPApplicationTarget:
         application_name: str = "application",
         client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncHTTPTransport | None = None,
+        allow_private_endpoints: bool = False,
     ) -> None:
         if connection.auth.requires_secret and not secret:
             raise ApplicationInvocationError(
@@ -94,6 +95,7 @@ class HTTPApplicationTarget:
         self._connection = connection
         self._secret = secret
         self._application_name = application_name
+        self._allow_private = allow_private_endpoints
         self._last_status: int | None = None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -107,7 +109,10 @@ class HTTPApplicationTarget:
             # pin every connection to a validated address (TOCTOU closure).
             trust_env=False,
             follow_redirects=False,
-            transport=transport or PinningAsyncHTTPTransport(),
+            transport=transport
+            or PinningAsyncHTTPTransport(
+                allow_private_endpoints=allow_private_endpoints
+            ),
         )
 
     async def invoke(self, prompt: str) -> ApplicationResponse:
@@ -218,7 +223,9 @@ class HTTPApplicationTarget:
         current_method, current_body = method, body
         for hop in range(MAX_REDIRECTS + 1):
             try:
-                await assert_url_resolves_public(url)
+                await assert_url_resolves_public(
+                    url, allow_private=self._allow_private
+                )
             except SSRFViolationError:
                 raise ApplicationInvocationError(
                     "Application endpoint was blocked by SSRF protection.",

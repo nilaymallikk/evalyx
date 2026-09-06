@@ -1,71 +1,36 @@
-"""Phase 16 API tests: the ``/api/v1/me`` endpoint (offline, fake context)."""
+"""API tests: the ``GET /api/v1/me`` local workspace endpoint (offline)."""
 
 from fastapi.testclient import TestClient
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
-from evalyx.api.dependencies import require_authenticated_user
 from evalyx.api.me import describe_caller
 from evalyx.core.config import Settings
 
 
-def _client(auth: AuthContext) -> TestClient:
+def _client() -> TestClient:
     from evalyx.api.ratelimit import InMemoryRateLimitBackend
 
     app = create_app(
-        Settings(auth_required=False),
+        Settings(),
         rate_limit_backend=InMemoryRateLimitBackend(),
     )
-    app.dependency_overrides[require_authenticated_user] = lambda: auth
     return TestClient(app)
 
 
-def test_me_endpoint_returns_token_derived_identity():
-    auth = AuthContext(
-        clerk_user_id="user_1",
-        clerk_organization_id="org_1",
-        organization_role=OrganizationRole.ADMIN,
-    )
-    response = _client(auth).get("/api/v1/me")
+def test_me_endpoint_returns_local_workspace():
+    response = _client().get("/api/v1/me")
     assert response.status_code == 200
     body = response.json()
-    assert body["clerk_user_id"] == "user_1"
-    assert body["active_organization"]["clerk_organization_id"] == "org_1"
-    assert body["active_organization"]["role"] == "admin"
+    assert body["user_id"] == "local"
+    assert body["active_organization"]["organization_id"] == "local"
+    assert body["active_organization"]["name"] == "local"
 
 
-def test_me_endpoint_requires_authentication():
-    from evalyx.api.ratelimit import InMemoryRateLimitBackend
+def test_me_response_never_contains_secret_like_fields():
+    import asyncio
 
-    app = create_app(
-        Settings(auth_required=False),
-        rate_limit_backend=InMemoryRateLimitBackend(),
-    )
-    # Dev mode with no org header yields an anonymous context → 401.
-    response = TestClient(app).get("/api/v1/me")
-    assert response.status_code == 401
-
-
-def test_me_response_never_contains_token_like_fields():
-    auth = AuthContext("user_1", "org_1", OrganizationRole.MEMBER)
-    body = _client(auth).get("/api/v1/me").json()
+    body = asyncio.run(describe_caller()).model_dump()
     flattened = str(body).lower()
     assert "token" not in flattened
     assert "secret" not in flattened
     assert "authorization" not in flattened
-
-
-def test_describe_caller_skips_enrichment_without_clerk():
-    """Dev verifier (no Clerk) → token-derived fields only, no crash."""
-    import asyncio
-
-    auth = AuthContext("user_1", None, None)
-
-    class _NoClerkVerifier:
-        async def verify(self, request) -> AuthContext:  # pragma: no cover
-            return auth
-
-    response = asyncio.run(describe_caller(auth, _NoClerkVerifier()))
-    assert response.email is None
-    assert response.organizations == []
-    assert response.active_organization is None

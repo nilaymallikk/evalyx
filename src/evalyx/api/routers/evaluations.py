@@ -45,7 +45,7 @@ from evalyx.evaluation.regression.service import RegressionService
 
 router = APIRouter(prefix="/evaluations", tags=["evaluations"])
 
-#: Authenticated + tenant-resolved dependency (Clerk org → local workspace).
+#: Workspace-resolved dependency (single local workspace).
 TenantContext = Annotated[tuple[AuthContext, Organization], Depends(require_organization)]
 
 
@@ -170,7 +170,7 @@ async def submit_evaluation(
     run, task_id = await service.submit(
         payload,
         organization_id=organization.id,
-        clerk_user_id=auth.clerk_user_id,
+        clerk_user_id=auth.user_id,
     )
     return EvaluationSubmissionResponse(
         run_id=run.id,

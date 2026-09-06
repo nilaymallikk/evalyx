@@ -29,7 +29,6 @@ def _settings_for(key: str, previous: str = "") -> Settings:
     return Settings(
         _env_file=None,
         evalyx_secret_key="placeholder",
-        auth_required=False,
         evalyx_encryption_key=key,
         evalyx_previous_encryption_keys=previous,
     )

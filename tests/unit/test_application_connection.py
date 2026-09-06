@@ -41,6 +41,33 @@ def test_endpoint_blocked(endpoint: str):
         _connection(endpoint=endpoint)
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://localhost:8000/v1/chat",
+        "http://127.0.0.1:8000/v1/chat",
+        "http://192.168.1.10/v1/chat",
+    ],
+)
+def test_private_endpoint_opt_in(endpoint: str):
+    """EVALYX_ALLOW_PRIVATE_ENDPOINTS=1 permits local endpoints at config
+    time (context kwarg); the default still rejects them."""
+    with pytest.raises(ValidationError):
+        _connection(endpoint=endpoint)
+    config = ConnectionConfig.model_validate(
+        {"endpoint": endpoint}, context={"allow_private_endpoints": True}
+    )
+    assert config.endpoint == endpoint
+
+
+def test_private_opt_in_still_blocks_metadata():
+    with pytest.raises(ValidationError):
+        ConnectionConfig.model_validate(
+            {"endpoint": "http://169.254.169.254/latest/meta-data"},
+            context={"allow_private_endpoints": True},
+        )
+
+
 def test_valid_connection_defaults():
     config = _connection()
     assert config.method == "POST"

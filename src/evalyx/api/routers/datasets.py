@@ -41,7 +41,7 @@ from evalyx.security.audit import (
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
-#: Authenticated + tenant-resolved dependency (Clerk org → local workspace).
+#: Workspace-resolved dependency (single local workspace).
 TenantContext = Annotated[tuple[AuthContext, Organization], Depends(require_organization)]
 
 
@@ -100,7 +100,7 @@ async def create_dataset(
     await quotas.admit_dataset_create(
         session,
         organization_id=organization.id,
-        clerk_user_id=auth.clerk_user_id,
+        clerk_user_id=auth.user_id,
     )
     dataset = await _repository().create(
         session,
@@ -112,7 +112,7 @@ async def create_dataset(
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=DATASET_CREATE,
             resource_type="dataset",
             resource_id=dataset.id,
@@ -239,7 +239,7 @@ async def create_dataset_version(
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=DATASET_VERSION_CREATE,
             resource_type="dataset_version",
             resource_id=version.id,
@@ -276,7 +276,7 @@ async def add_test_case(
     await quotas.admit_case_add(
         session,
         organization_id=organization.id,
-        clerk_user_id=auth.clerk_user_id,
+        clerk_user_id=auth.user_id,
         dataset_version_id=dataset_version.id,
     )
     case = await _repository().add_test_case(
@@ -292,7 +292,7 @@ async def add_test_case(
         await record_audit_event(
             session,
             organization_id=organization.id,
-            clerk_user_id=auth.clerk_user_id,
+            clerk_user_id=auth.user_id,
             action=DATASET_CASE_ADD,
             resource_type="test_case",
             resource_id=case.id,

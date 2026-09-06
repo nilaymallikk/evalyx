@@ -1,12 +1,12 @@
-"""Typed HTTP client for the Evalyx REST API (Phase 16).
+"""Typed HTTP client for the Evalyx REST API.
 
 One client, used by every CLI command and the TUI. Responsibilities:
 
-- attach the stored bearer credential (Clerk session token in production;
-  the dev organization header in ``AUTH_REQUIRED=0`` local mode)
 - normalize backend errors into :mod:`evalyx.cli.errors` exceptions
 - bounded retries for idempotent GET requests on transient failures
-- never log, print, or embed the Authorization header or token anywhere
+
+Evalyx is local-first: there is no login and no credential. The client
+sends plain requests to the configured API URL.
 
 All resource access mirrors the real API contract (``/api/v1/...``): the
 client is a thin, typed wrapper — no evaluation, scoring, or tenancy logic.
@@ -26,22 +26,13 @@ from evalyx.cli.errors import EvalyxCLIError
 class EvalyxClient:
     """Typed client for the Evalyx API. The CLI/TUI's single network path."""
 
-    def __init__(self, config: Config | None = None, token: str | None = None) -> None:
+    def __init__(self, config: Config | None = None) -> None:
         self.config = config or load_config()
-        self._token = token
 
     # -- transport ------------------------------------------------------------
 
     def _headers(self) -> dict[str, str]:
-        if self._token:
-            return {"Authorization": f"Bearer {self._token}"}
-        # Dev mode: an explicit organization preference travels in the
-        # bounded X-Dev-Organization-Id header (honored only by a
-        # backend running with AUTH_REQUIRED=0; production requires a
-        # Clerk bearer token and ignores it entirely).
-        if self.config.org:
-            return {"X-Dev-Organization-Id": self.config.org}
-        return {}
+        return {"Content-Type": "application/json"}
 
     def request(
         self,

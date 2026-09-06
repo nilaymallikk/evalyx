@@ -1,45 +1,28 @@
-"""FastAPI dependencies: authentication, database sessions, and services.
+"""FastAPI dependencies: database sessions and services.
 
 The engine and session factory are owned by the single ``DatabaseManager``
 stored on ``app.state`` at startup (created once — never per request). The
 session dependency opens one transactional session per request and closes
 it afterwards; commits are performed by repositories.
 
-Authentication (Phase 14): a :class:`TokenVerifier` stored on ``app.state``
-turns the request's Clerk session token into an :class:`AuthContext`.
-Tenant-scoped endpoints go through :func:`require_organization`, which maps
-the verified Clerk organization to the local tenant row and raises 401/403
-per the authentication behavior contract. Identity is *never* read from
-request body/query fields.
+Identity: Evalyx is local-first with a single workspace. ``require_organization``
+resolves (auto-provisioning) that workspace; every resource read/write is
+still filtered by ``organization_id`` at the repository boundary.
 """
 
-import re
-import typing
 from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from evalyx.api.auth import (
-    AuthContext,
-    OrganizationRequiredError,
-    OrganizationRole,
-    OrganizationRoleError,
-    TokenVerifier,
-)
-
-#: The dev-mode organization header (only honored when AUTH_REQUIRED=0).
-#: ``org_`` prefix plus bounded word characters and hyphens: wide enough
-#: for local names (``org_dev_default``, ``org_beta_e2e``) while still
-#: rejecting spaces, control characters, and injection payloads.
-_DEV_ORG_PATTERN = re.compile(r"^org_[A-Za-z0-9_-]{1,64}$")
+from evalyx.api.auth import AuthContext, local_context
 from evalyx.api.schemas.common import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE
 from evalyx.api.services import EvaluationService
 from evalyx.core.config import Settings
 from evalyx.db.models import Organization
 from evalyx.db.session import DatabaseManager
-from evalyx.db.tenancy import require_organization as require_organization_row
+from evalyx.db.tenancy import require_local_organization
 from evalyx.evaluation.regression.service import RegressionService
 from evalyx.quotas import QuotaService
 
@@ -54,133 +37,21 @@ def get_database(request: Request) -> DatabaseManager:
     return request.app.state.database
 
 
-class DevOrganizationContext:
-    """Local-development-only organization context (AUTH_REQUIRED=0).
-
-    Production never constructs this object. Its ``verify`` honors the
-    bounded ``X-Dev-Organization-Id`` header so a CLI can exercise the real
-    REST surface (identity flows in the Authorization header position, never
-    from body/query data) without any Clerk dependency in the client.
-    """
-
-    _HEADER = "X-Dev-Organization-Id"
-    _PATTERN = _DEV_ORG_PATTERN
-
-    async def verify(self, request: Request) -> AuthContext:
-        # Lowercase lookup: Starlette headers are case-insensitive either
-        # way, and this also works against plain dict headers in tests.
-        raw = (request.headers.get(self._HEADER.lower()) or "").strip()
-        if self._PATTERN.fullmatch(raw):
-            return AuthContext(
-                clerk_user_id="dev-cli",
-                clerk_organization_id=raw,
-                organization_role=OrganizationRole.ADMIN,
-            )
-        return AuthContext(
-            clerk_user_id="dev-anonymous",
-            clerk_organization_id=None,
-            organization_role=None,
-        )
-
-
-dev_verifier: TokenVerifier = DevOrganizationContext()
-
-
-def get_token_verifier(request: Request) -> TokenVerifier:
-    """The Clerk token verifier wired at startup (``app.state``).
-
-    With ``AUTH_REQUIRED=0`` the verifier is the dev-mode context: it
-    accepts the bounded ``X-Dev-Organization-Id`` header so CLI/TUI clients
-    exercise the real API contract locally. Never active in production
-    (``_validate_production_safety`` forbids disabling auth there).
-    """
-    verifier = request.app.state.token_verifier
-    if type(verifier).__name__ == "NoopTokenVerifier":
-        return dev_verifier
-    return verifier
-
-
-async def get_auth_context(
-    request: Request,
-    verifier: Annotated[TokenVerifier, Depends(get_token_verifier)],
-) -> AuthContext:
-    """Verify the request's Clerk token into an immutable AuthContext.
-
-    Raises :class:`AuthenticationError` (mapped to 401 by the error
-    handlers) for missing/invalid/expired tokens; error messages never
-    include token contents.
-    """
-    return await verifier.verify(request)
-
-
-async def require_authenticated_user(
-    auth: Annotated[AuthContext, Depends(get_auth_context)],
-) -> AuthContext:
-    """Authenticated user endpoint guard (no organization required)."""
-    if not auth.is_authenticated:
-        from evalyx.api.auth import AuthenticationError
-
-        raise AuthenticationError("Authentication failed.")
-    return auth
+async def require_authenticated_user() -> AuthContext:
+    """Local operator context (no login required)."""
+    return local_context()
 
 
 async def require_organization(
     session: Annotated[AsyncSession, Depends(get_session)],
-    auth: Annotated[AuthContext, Depends(require_authenticated_user)],
-    settings: Annotated[Settings, Depends(get_settings)],
 ) -> tuple[AuthContext, Organization]:
-    """Tenant-scoped endpoint guard.
+    """Workspace-scoped endpoint guard.
 
-    Requires an authenticated user with an active Clerk organization and
-    maps it to the local tenant row (auto-provisioned on first use). The
-    returned ``organization.id`` is the only tenant id endpoints may use —
-    client-supplied organization/workspace fields are never trusted.
-
-    An authenticated user without an active organization is denied with a
-    durable audit row (committed before raising) so authorization failures
-    are observable beyond logs.
+    Resolves (auto-provisioning) the single local workspace. The returned
+    ``organization.id`` is the only tenant id endpoints may use.
     """
-    if auth.clerk_organization_id is None:
-        if settings.audit_enabled:
-            from evalyx.security.audit import (
-                AUTH_ORGANIZATION_REQUIRED,
-                record_denial_and_commit,
-            )
-
-            await record_denial_and_commit(
-                session,
-                organization_id=None,
-                clerk_user_id=auth.clerk_user_id,
-                action=AUTH_ORGANIZATION_REQUIRED,
-            )
-        raise OrganizationRequiredError(
-            "An active organization is required for this operation."
-        )
-    organization = await require_organization_row(
-        session, auth.clerk_organization_id
-    )
-    return auth, organization
-
-
-def require_role(
-    *allowed: OrganizationRole,
-) -> typing.Callable[[tuple[AuthContext, Organization]], AuthContext]:
-    """Privileged-operation guard: the active role must be in ``allowed``."""
-
-    def _check(
-        context: Annotated[tuple[AuthContext, Organization], Depends(require_organization)],
-    ) -> AuthContext:
-        auth, _organization = context
-        if auth.organization_role not in allowed:
-            raise OrganizationRoleError(
-                "Your organization role does not permit this operation."
-            )
-        return auth
-
-    return _check
-
-
-require_admin = require_role(OrganizationRole.ADMIN)
+    organization = await require_local_organization(session)
+    return local_context(), organization
 
 
 async def get_session(

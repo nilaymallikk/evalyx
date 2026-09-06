@@ -45,16 +45,10 @@ from sqlalchemy.exc import (
     TimeoutError as SQLAlchemyTimeoutError,
 )
 
-from evalyx.api.auth import (
-    AuthenticationError,
-    OrganizationRequiredError,
-    OrganizationRoleError,
-)
 from evalyx.api.middleware import SCOPE_REQUEST_ID_KEY
 from evalyx.application.connection import ConnectionConfigError
 from evalyx.core.context import get_request_id
 from evalyx.core.encryption import EncryptionError
-from evalyx.core.metrics import metrics
 from evalyx.db.repositories import DuplicateVersionError, NotFoundError
 from evalyx.evaluation.regression.service import RegressionValidationError
 
@@ -180,41 +174,6 @@ def register_error_handlers(app: FastAPI) -> None:
         summary = "; ".join(f"{d['loc']}: {d['msg']}" for d in details) or "Invalid request."
         return _error_response(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "validation_error", summary
-        )
-
-    @app.exception_handler(AuthenticationError)
-    async def _handle_authentication(_: Request, exc: AuthenticationError) -> JSONResponse:
-        # 401 with a kind-only message: no token contents, no Clerk details.
-        # Denials are observable via logs + bounded metric (no DB write: the
-        # caller is unauthenticated, so unauthenticated writes would be an
-        # abuse vector of their own).
-        logger.warning("auth_denied", reason="authentication_failed")
-        metrics.increment("auth_denied_total", {"reason": "authentication_failed"})
-        return _error_response(
-            status.HTTP_401_UNAUTHORIZED,
-            "authentication_failed",
-            str(exc),
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    @app.exception_handler(OrganizationRequiredError)
-    async def _handle_organization_required(
-        _: Request, exc: OrganizationRequiredError
-    ) -> JSONResponse:
-        logger.warning("auth_denied", reason="organization_required")
-        metrics.increment("auth_denied_total", {"reason": "organization_required"})
-        return _error_response(
-            status.HTTP_403_FORBIDDEN, "organization_required", str(exc)
-        )
-
-    @app.exception_handler(OrganizationRoleError)
-    async def _handle_organization_role(
-        _: Request, exc: OrganizationRoleError
-    ) -> JSONResponse:
-        logger.warning("auth_denied", reason="insufficient_role")
-        metrics.increment("auth_denied_total", {"reason": "insufficient_role"})
-        return _error_response(
-            status.HTTP_403_FORBIDDEN, "insufficient_role", str(exc)
         )
 
     @app.exception_handler(NotFoundError)

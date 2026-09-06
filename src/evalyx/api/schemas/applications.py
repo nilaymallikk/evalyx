@@ -43,7 +43,9 @@ def clean_configuration(configuration: dict | None) -> dict:
     return sanitize_configuration(payload)
 
 
-def validate_connection(connection: dict | None) -> dict | None:
+def validate_connection(
+    connection: dict | None, *, allow_private_endpoints: bool = False
+) -> dict | None:
     """Validate a version's connection configuration; return its sanitized
     storage form (secret-looking keys stripped before persistence).
 
@@ -57,7 +59,12 @@ def validate_connection(connection: dict | None) -> dict | None:
         raise ConnectionConfigError("connection must be a JSON object.")
     sanitized = sanitize_configuration(connection)
     try:
-        return ConnectionConfig.model_validate(sanitized).model_dump(mode="json")
+        return (
+            ConnectionConfig.model_validate(
+                sanitized,
+                context={"allow_private_endpoints": allow_private_endpoints},
+            ).model_dump(mode="json")
+        )
     except ConnectionConfigError as exc:
         raise ConnectionConfigError(str(exc)) from None
     except ValidationError as exc:
@@ -175,8 +182,12 @@ class ApplicationVersionCreate(BaseModel):
     def sanitized_configuration(self) -> dict:
         return clean_configuration(self.configuration)
 
-    def validated_connection(self) -> dict | None:
-        return validate_connection(self.connection)
+    def validated_connection(
+        self, *, allow_private_endpoints: bool = False
+    ) -> dict | None:
+        return validate_connection(
+            self.connection, allow_private_endpoints=allow_private_endpoints
+        )
 
 
 class ApplicationVersionResponse(BaseModel):

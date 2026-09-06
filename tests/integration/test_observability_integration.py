@@ -33,7 +33,7 @@ async def clean_db(db_manager):
 @pytest.fixture
 async def api(clean_db, settings):
     from evalyx.api.app import create_app
-    from evalyx.api.auth import AuthContext, OrganizationRole
+    from evalyx.api.auth import AuthContext
     from evalyx.api.dependencies import require_organization
 
     app = create_app(settings, database=clean_db)
@@ -44,11 +44,7 @@ async def api(clean_db, settings):
         async with clean_db.session() as s:
             organization = await resolve_row(s, "org_integration_test")
         return (
-            AuthContext(
-                clerk_user_id="integration-user",
-                clerk_organization_id="org_integration_test",
-                organization_role=OrganizationRole.ADMIN,
-            ),
+            AuthContext(),
             organization,
         )
 

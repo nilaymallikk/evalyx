@@ -14,11 +14,9 @@ quota windows) lives in Redis/PostgreSQL, not here.
 """
 
 import socket
-from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 
-from evalyx.api.dependencies import require_authenticated_user
 from evalyx.core.metrics import metrics
 
 router = APIRouter(tags=["operations"])
@@ -31,16 +29,14 @@ def _instance_id() -> str:
 
 @router.get(
     "/metrics",
-    summary="Operational metrics snapshot (authenticated)",
+    summary="Operational metrics snapshot",
     description=(
         "In-process counters and timing aggregates for the API process: "
         "HTTP request counts/latency, evaluation submissions, connection "
-        "tests, application invocations. Requires authentication. "
+        "tests, application invocations. "
         "Worker-process metrics live in the worker logs; queue depth is "
         "observed via the worker/Celery inspection (see deployment docs)."
     ),
 )
-async def get_metrics(
-    _auth: Annotated[object, Depends(require_authenticated_user)],
-) -> dict:
+async def get_metrics() -> dict:
     return {"instance": _instance_id(), "metrics": metrics.snapshot()}

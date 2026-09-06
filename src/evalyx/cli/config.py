@@ -1,13 +1,11 @@
-"""CLI-local configuration: API URL, organization preference, output prefs.
+"""CLI-local configuration: API URL and output prefs.
 
 Precedence (documented in the README): CLI flag > environment variable
-(``EVALYX_API_URL`` / ``EVALYX_ORG``) > config file > default.
+(``EVALYX_API_URL``) > config file > default.
 
 The config file is non-secret by design (``~/.config/evalyx/config.toml``):
-no tokens, no Clerk secrets, no application credentials ever live here.
-Authentication credentials go to the keyring-backed store (``auth.py``) or,
-when no keyring backend exists, to ``~/.config/evalyx/credentials.json``
-with ``0600`` permissions.
+no tokens or credentials ever live here — Evalyx is local-first and needs
+no login. Application credentials stay server-side, encrypted.
 """
 
 import os
@@ -41,7 +39,6 @@ class Config:
     """Resolved CLI configuration (non-secret)."""
 
     api_url: str = DEFAULT_API_URL
-    org: str | None = None
     quiet: bool = False
     verbose: bool = False
     timeout: float = 30.0
@@ -52,7 +49,6 @@ class Config:
 def load_config(
     *,
     api_url: str | None = None,
-    org: str | None = None,
     quiet: bool = False,
     verbose: bool = False,
     timeout: float | None = None,
@@ -72,9 +68,6 @@ def load_config(
         or file_values.get("api_url")
         or DEFAULT_API_URL
     )
-    resolved_org = (
-        org or os.environ.get("EVALYX_ORG") or file_values.get("org") or None
-    )
     resolved_timeout = (
         timeout
         or float(os.environ.get("EVALYX_TIMEOUT", "") or 0)
@@ -83,7 +76,6 @@ def load_config(
     )
     return Config(
         api_url=str(resolved_api_url).rstrip("/"),
-        org=resolved_org,
         quiet=quiet,
         verbose=verbose,
         timeout=resolved_timeout,
@@ -92,7 +84,7 @@ def load_config(
     )
 
 
-def save_config(api_url: str | None = None, org: str | None = None) -> None:
+def save_config(api_url: str | None = None) -> None:
     """Persist chosen non-secret preferences as a minimal TOML file."""
     directory = config_dir()
     directory.mkdir(parents=True, exist_ok=True)
@@ -100,7 +92,5 @@ def save_config(api_url: str | None = None, org: str | None = None) -> None:
     lines = ["# Evalyx CLI configuration (non-secret).", ""]
     if api_url:
         lines.append(f'api_url = "{api_url}"')
-    if org:
-        lines.append(f'org = "{org}"')
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600 — same caution as credentials

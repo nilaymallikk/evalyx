@@ -87,7 +87,8 @@ def normalize_http_error(exc: httpx.HTTPStatusError, subject: str) -> EvalyxCLIE
     hint = None
     if response.status_code == 401:
         return AuthenticationError(
-            "Authentication failed or expired.", hint="Run: evalyx login"
+            "Authentication failed or expired.",
+            hint="The API should not require login — is it running the same Evalyx version?",
         )
     if response.status_code == 403:
         if code == "organization_required":

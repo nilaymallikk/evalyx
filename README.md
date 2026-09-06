@@ -1,143 +1,115 @@
 # Evalyx
 
-**Terminal-first platform for evaluating LLM applications and agents.**
-Register your app, run versioned test datasets against it over HTTP, grade
-answers with guardrails, and detect regressions between runs.
+Test your AI app before and after every change. Evalyx sends test questions
+to your app over HTTP, grades the answers, and tells you what got worse.
 
-Version `0.9.0b1` (Public Beta)
+```bash
+curl -fsSL https://raw.githubusercontent.com/nilaymallikk/evalyx/main/install.sh | bash
+```
 
-## Run it
-
-Prerequisites: Docker, [`uv`](https://docs.astral.sh/uv), Python 3.14.
+Or manually:
 
 ```bash
 git clone https://github.com/nilaymallikk/evalyx
 cd evalyx
-
-docker compose up -d          # PostgreSQL (:5433) + Redis (:6379)
+docker compose up -d
 uv sync
-cp .env.example .env          # fill in OPENROUTER_API_KEY + EVALYX_SECRET_KEY
-
-uv run python main.py         # API on http://127.0.0.1:8000 (terminal 1)
-uv run celery -A evalyx.worker.celery_app worker --loglevel=INFO  # worker (terminal 2)
+cp .env.example .env          # add OPENROUTER_API_KEY + EVALYX_SECRET_KEY
+uv run python main.py         # terminal 1: API on http://127.0.0.1:8000
+uv run celery -A evalyx.worker.celery_app worker --loglevel=INFO  # terminal 2: worker
 ```
 
-Dev login (no Clerk needed locally):
+## Evaluate your app in 5 minutes
 
 ```bash
-evalyx login --org org_quickstart
+uv run evalyx quickstart
 ```
 
-Production is a Compose stack (API + worker + Postgres + Redis + nginx):
-see [docs/deployment.md](docs/deployment.md).
+Answer the questions it asks (your app's URL, a few sample questions).
+It registers the app, checks the connection, runs an evaluation, and
+prints the score. Done.
 
-## Connect an external app
+## Do it step by step
 
-Evalyx never imports your code — it calls your app's HTTP endpoint.
-
-> **Reading the commands below.** Anything in `<angle brackets>` is a
-> placeholder you replace with a real value:
->
-> - `<app_id>` — the id printed when you create the app, e.g.
->   `evalyx app create support-assistant` prints something like
->   `Application created: support-assistant (48a5bcc2-…)`. Copy that long
->   id (or its first 8 characters) wherever you see `<app_id>`.
-> - `https://your-app.example.com/v1/chat` — the real public URL of **your**
->   AI app's chat endpoint, e.g. `https://api.mycompany.com/v1/chat`.
-> - `--auth bearer` — how your endpoint authenticates: `none` (open),
->   `bearer` (needs a token, which you store separately via
->   `evalyx app secret <app_id>`), or `api_key`.
+Replace `<app_id>`, `<ds_id>`, `<dsv_id>`, `<run_id>` with the ids each
+command prints.
 
 ```bash
-# 1. Register the app (Evalyx prints its <app_id>)
-evalyx app create support-assistant --type http
+# 1. Register your app
+uv run evalyx app create myapp --type http
 
-# 2. Tell Evalyx how to call it (saved permanently on version "v1")
-evalyx app version <app_id> v1 \
-  --endpoint https://your-app.example.com/v1/chat \
-  --auth bearer --input-field question --response-path answer
+# 2. Tell Evalyx how to call it
+uv run evalyx app version <app_id> v1 \
+  --endpoint https://your-app.com/chat \
+  --auth none --input-field question --response-path answer
 
-# 3. Check the connection
-evalyx app test <app_id>
+# 3. Check it works
+uv run evalyx app test <app_id>
+
+# 4. Make a dataset
+uv run evalyx dataset create mydata
+# create version 1:
+curl -s -X POST http://127.0.0.1:8000/api/v1/datasets/<ds_id>/versions \
+  -H 'Content-Type: application/json' -d '{"version": 1}'
+uv run evalyx dataset add-case <ds_id> 1 --name q1 \
+  --input '{"prompt":"Say hello."}'
+
+# 5. Run the evaluation
+uv run evalyx eval run --application <app_id> --dataset-version <dsv_id> \
+  --agent-model application:myapp --wait
+
+# 6. See the results
+uv run evalyx eval results <run_id>
+uv run evalyx eval guardrails <run_id>
+
+# 7. After changing your app, run again and compare
+uv run evalyx regression run --baseline <old_run_id> --current <run_id>
 ```
 
-What happens on each call: Evalyx sends `POST {"question": "<test input>"}`
-to your endpoint and reads the answer from the field you named in
-`--response-path` (here: `{"answer": "…"}`). Secrets are encrypted at rest
-and never shown back. Only public endpoints are accepted (SSRF-protected),
-so `localhost` URLs are rejected — use a reachable URL or tunnel.
+Your endpoint gets `POST {"question": "..."}` and should reply with the
+answer in the field you named (`{"answer": "..."}`).
 
-## Evaluate it
+## App runs on your own machine?
 
-> **More placeholders, same idea:**
->
-> - `<ds_id>` — the dataset id printed by `evalyx dataset create`, e.g.
->   `Dataset created: support-dataset (94927eac-…)`.
-> - `<dsv_id>` — the *dataset version* id. Datasets are versioned, so a run
->   points at a version, not the dataset itself. Create one with:
->   `curl -s -X POST http://127.0.0.1:8000/api/v1/datasets/<ds_id>/versions -H 'Content-Type: application/json' -d '{"version": 1}'`
->   and copy the `"id"` from the response.
-> - `<run_id>` — the run id printed by `eval run`, e.g. `Run: ee648d90-…`.
-> - `application:support-assistant` — the literal word `application:` plus
->   the **name** you gave your app (not its id). This tells Evalyx to call
->   your app instead of a raw model.
+Public URLs work by default. For `localhost`, add this to `.env` and
+restart the API and worker:
+
+```
+EVALYX_ALLOW_PRIVATE_ENDPOINTS=1
+```
+
+Then register the localhost URL normally. (Never enable this in
+production. A local **MLGPT** is the exception — use
+`evalyx app create mlgpt --type mlgpt` with
+`MLGPT_BASE_URL=http://127.0.0.1:8002`, no flag needed.)
+
+## No app to test yet?
+
+Evaluate a model directly — no app, no endpoint:
 
 ```bash
-# 1. Dataset + test cases
-evalyx dataset create support-dataset
-evalyx dataset add-case <ds_id> 1 --name greeting \
-  --input '{"prompt":"Say hello in one sentence."}' \
-  --expected '{"answer":"Hello!"}'
-
-# 2. Submit a run (async) and wait
-evalyx eval run --application <app_id> --dataset-version <dsv_id> \
-  --agent-model application:support-assistant --wait
-
-# 3. Inspect results
-evalyx eval results <run_id>       # per-case outcomes
-evalyx eval guardrails <run_id>    # PII, injection, safety, hallucination, instruction-following
-evalyx eval reliability <run_id>   # why cases failed to execute (timeout, rate limit, …)
-
-# 4. Compare with a baseline
-evalyx regression run --baseline <old_run_id> --current <run_id>
+uv run evalyx eval run --application <app_id> --dataset-version <dsv_id> \
+  --agent-model nvidia/nemotron-3-ultra-550b-a55b:free --wait
 ```
 
-Every command supports `--json` for CI. Exit `0` from
-`eval run --wait --json` means no quality failures. Full command list:
-`evalyx --help`. Raw HTTP API: Swagger at `http://127.0.0.1:8000/docs`.
+## Commands
 
-## Architecture
-
-```text
-evalyx CLI/TUI ──REST──► FastAPI ──202──► Redis ⇄ Celery worker
-                                                      │
-                              ┌───────────────────────┼───────────────────────┐
-                              ▼                       ▼                       ▼
-                       EvaluationRunner          Guardrails               Scoring
-                    (your app over HTTP     (deterministic PII/     (executed →
-                     or an LLM provider,     injection + LLM-judge   passed/failed;
-                     one per run)            safety/hallucination/   errors stay
-                                             instruction-following)  distinct)
-                              └───────────────────────┼───────────────────────┘
-                                                      ▼
-                                    PostgreSQL (state of record)
-                                                      ▼
-                                   Regression engine (LLM-free):
-                                   baseline vs current → verdict
+```bash
+uv run evalyx --help            # everything
+uv run evalyx whoami            # check the setup
+uv run evalyx                   # interactive terminal UI
 ```
 
-Rules the codebase enforces:
+Every command takes `--json` for scripts. API docs: http://127.0.0.1:8000/docs
 
-- **PostgreSQL is authoritative.** Redis/Celery carry task state only.
-- **Quality ≠ execution failure.** A bad answer (`failed`) is distinct
-  from no answer (`error`, with a typed reason like `timeout`).
-- **One target per run.** `agent_model` is a model name or
-  `application:<name>`; both share runner, guardrails, and scoring.
-- **Multi-tenant.** Clerk organizations bound every query; other tenants
-  read as 404.
-- **No web dashboard.** Terminal + API only.
+## How it works
 
-Tests: `uv run pytest` (unit) · `EVALYX_RUN_INTEGRATION_TESTS=1 uv run pytest`
-(live PG/Redis) · `uv run ruff check src tests` · `uv run mypy src`.
+```
+CLI ──REST──► API ──202──► Redis ⇄ Worker ──HTTP──► your app
+                                          │
+                              guardrails + scoring
+                                          ▼
+                              PostgreSQL ──► regression compare
+```
 
-License: see [LICENSE](LICENSE).
+Tests: `uv run pytest`

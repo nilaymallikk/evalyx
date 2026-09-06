@@ -1,25 +1,21 @@
-"""Production smoke test for Evalyx (Phase 17).
+"""Smoke test for Evalyx.
 
-Verifies the deployment path without committing any secrets: every
-credential comes from the environment.
+Verifies the deployment path with no login and no secrets: the only
+input is the base URL.
 
 Required:
-    EVALYX_API_URL  base URL of the deployment (https://... in production)
-    EVALYX_TOKEN    Clerk session token for an operator account
-                    (production). For local AUTH_REQUIRED=0 servers, set
-                    EVALYX_ORG instead (e.g. org_smoketest — lowercase
-                    alphanumerics after the `org_` prefix).
+    EVALYX_API_URL  base URL of the deployment (https://... in production,
+                    http://127.0.0.1:8000 locally)
 
 Optional:
     EVALYX_SMOKE_SUBMIT=1  also submit one evaluation + poll status
     EVALYX_APPLICATION_ID / EVALYX_DATASET_VERSION_ID for the submit step
 
 Checks:
-    /health, /health/ready, authenticated /api/v1/me, application listing,
+    /health, /health/ready, /api/v1/me, application listing,
     dataset listing, evaluation submission (opt-in), evaluation status,
     reliability endpoint. Exits non-zero on the first failure; prints one
-    line per check (PASS/FAIL) with safe details only (no tokens, no
-    secrets, no connection strings).
+    line per check (PASS/FAIL) with safe details only.
 """
 
 from __future__ import annotations
@@ -32,10 +28,6 @@ import urllib.error
 import urllib.request
 
 API_URL = os.environ.get("EVALYX_API_URL", "").rstrip("/")
-TOKEN = os.environ.get("EVALYX_TOKEN", "")
-# Local development servers (AUTH_REQUIRED=0) honor the bounded dev
-# organization header instead of Clerk tokens — same contract as the CLI.
-DEV_ORG = os.environ.get("EVALYX_ORG", "")
 SUBMIT = os.environ.get("EVALYX_SMOKE_SUBMIT", "") == "1"
 
 FAILURES = 0
@@ -46,15 +38,9 @@ def _request(
 ) -> tuple[int, object]:
     url = f"{API_URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    if TOKEN:
-        auth = {"Authorization": f"Bearer {TOKEN}"}
-    elif DEV_ORG:
-        auth = {"X-Dev-Organization-Id": DEV_ORG}
-    else:
-        auth = {}
     request = urllib.request.Request(
         url, data=data, method=method,
-        headers={"Accept": "application/json", **auth},
+        headers={"Accept": "application/json"},
     )
     if body is not None:
         request.add_header("Content-Type", "application/json")
@@ -81,10 +67,6 @@ def main() -> int:
     if not API_URL:
         print("EVALYX_API_URL must be set (e.g. https://api.example.com).")
         return 2
-    if not TOKEN and not DEV_ORG:
-        print("Set EVALYX_TOKEN (production Clerk session token) or "
-              "EVALYX_ORG (local AUTH_REQUIRED=0 server).")
-        return 2
 
     status, body = _request("GET", "/health")
     check("liveness /health", status == 200 and body == {"status": "ok"},
@@ -95,7 +77,7 @@ def main() -> int:
     check("readiness /health/ready", ready, f"HTTP {status}: {body}")
 
     status, body = _request("GET", "/api/v1/me")
-    check("authenticated /api/v1/me", status == 200, f"HTTP {status}")
+    check("/api/v1/me", status == 200, f"HTTP {status}")
 
     status, body = _request("GET", "/api/v1/applications?limit=1")
     check("application listing", status == 200, f"HTTP {status}")

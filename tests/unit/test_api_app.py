@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import get_evaluation_service, require_organization
 from evalyx.api.errors import EvaluationSubmissionError, register_error_handlers
 from evalyx.core.config import Settings
@@ -48,15 +48,11 @@ def build_client() -> TestClient:
     from evalyx.api.ratelimit import InMemoryRateLimitBackend
 
     app = create_app(
-        Settings(auth_required=False),
+        Settings(),
         rate_limit_backend=InMemoryRateLimitBackend(),
     )
     fake_context = (
-        AuthContext(
-            clerk_user_id="unit-test-user",
-            clerk_organization_id="org_unit_test",
-            organization_role=OrganizationRole.ADMIN,
-        ),
+        AuthContext(),
         Organization(name="Unit Test Org"),
     )
     app.dependency_overrides[require_organization] = lambda: fake_context

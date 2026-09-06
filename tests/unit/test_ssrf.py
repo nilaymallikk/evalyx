@@ -109,3 +109,54 @@ def test_is_redirect_statuses():
 def test_literal_non_global_ipv6_blocked():
     with pytest.raises(SSRFViolationError):
         assert_static_url_allowed("http://[fd00::1]/v1/chat")  # ULA private
+
+# -- EVALYX_ALLOW_PRIVATE_ENDPOINTS opt-in ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8000/v1/chat",
+        "http://127.0.0.1:8000/v1/chat",
+        "http://10.0.0.5/v1/chat",
+        "http://192.168.1.10/v1/chat",
+        "http://[::1]/v1/chat",
+    ],
+)
+def test_allow_private_accepts_loopback_and_private(url: str):
+    assert_static_url_allowed(url, allow_private=True)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data",  # cloud metadata stays blocked
+        "http://[fe80::1]/v1/chat",  # link-local stays blocked
+        "http://0.0.0.0/v1/chat",  # unspecified stays blocked
+        "ftp://127.0.0.1/v1/chat",  # scheme rules unchanged
+        "http://user:pass@127.0.0.1/v1/chat",  # credential rules unchanged
+        "https://127.0.0.1/v1/chat#fragment",  # fragment rules unchanged
+    ],
+)
+def test_allow_private_still_blocks_non_local_dangers(url: str):
+    with pytest.raises(SSRFViolationError):
+        assert_static_url_allowed(url, allow_private=True)
+
+
+def test_allow_private_resolution_accepts_loopback(monkeypatch):
+    _fake_getaddrinfo(monkeypatch, "127.0.0.1")
+    asyncio.run(
+        assert_url_resolves_public(
+            "http://myapp.local:8000/v1/chat", allow_private=True
+        )
+    )
+
+
+def test_allow_private_resolution_still_blocks_metadata(monkeypatch):
+    _fake_getaddrinfo(monkeypatch, "169.254.169.254")
+    with pytest.raises(SSRFViolationError):
+        asyncio.run(
+            assert_url_resolves_public(
+                "http://myapp.local:8000/v1/chat", allow_private=True
+            )
+        )

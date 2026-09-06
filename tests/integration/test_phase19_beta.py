@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from test_runner import FakeProvider
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import require_organization
 from evalyx.application.base import ApplicationResponse
 from evalyx.core.config import Settings
@@ -43,11 +43,7 @@ async def api(clean_db: DatabaseManager, settings: Settings):
         async with clean_db.session() as s:
             organization = await resolve_row(s, "org_beta_phase19")
         return (
-            AuthContext(
-                clerk_user_id="beta-user",
-                clerk_organization_id="org_beta_phase19",
-                organization_role=OrganizationRole.ADMIN,
-            ),
+            AuthContext(),
             organization,
         )
 

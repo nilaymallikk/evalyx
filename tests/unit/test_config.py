@@ -44,7 +44,7 @@ _TEST_ENCRYPTION_KEY = "CZWNnvRiuKkYgjlplxwPzBYz1hQYgo72d8M29i22800="
 
 def make_settings(**overrides) -> Settings:
     """Build Settings without reading the developer's local .env file."""
-    defaults = {"evalyx_secret_key": _PLACEHOLDER_SECRET, "auth_required": False}
+    defaults = {"evalyx_secret_key": _PLACEHOLDER_SECRET}
     return Settings(_env_file=None, **{**defaults, **overrides})
 
 
@@ -93,45 +93,41 @@ class TestSecretValidation:
             make_settings(app_env="production", evalyx_secret_key="change-me")
 
     def test_generated_secret_accepted_in_production(self):
-        # Phase 15: production additionally requires authentication and the
-        # encryption key, so this acceptance test supplies both. The intent
+        # Production additionally requires the encryption key. The intent
         # is unchanged: a generated (non-placeholder) EVALYX_SECRET_KEY is
         # accepted in production. All credential-looking values are fake
         # placeholders assembled from fragments (never real secrets).
         fake_secret = "generated-" + "value-" + str(uuid.uuid4())
-        fake_clerk_secret = "sk_test_placeholder_" + "not-a-real-key"
         settings = make_settings(
             app_env="production",
             evalyx_secret_key=fake_secret,
-            auth_required=True,
-            clerk_jwks_url="https://instance.clerk.accounts.dev/.well-known/jwks.json",
-            clerk_secret_key=fake_clerk_secret,
             evalyx_encryption_key=_TEST_ENCRYPTION_KEY,
         )
 
         assert settings.app_env == "production"
 
 
-class TestProductionAuthHardening:
-    """Phase 15 Step 25: production cannot run with authentication off."""
-
-    def test_production_auth_required_zero_fails(self):
-        with pytest.raises(ValueError, match="AUTH_REQUIRED"):
-            make_settings(app_env="production", auth_required=False)
-
-    def test_development_auth_required_zero_allowed(self):
-        settings = make_settings(app_env="development", auth_required=False)
-        assert settings.auth_required is False
+class TestProductionHardening:
+    """Production requires the encryption key; there is no login to disable."""
 
     def test_production_requires_encryption_key(self):
         with pytest.raises(ValueError, match="EVALYX_ENCRYPTION_KEY"):
             make_settings(
                 app_env="production",
-                auth_required=True,
-                clerk_jwks_url="https://instance.clerk.accounts.dev/.well-known/jwks.json",
-                clerk_secret_key=_PLACEHOLDER_SECRET,
                 evalyx_encryption_key="",  # explicitly unset (env may provide one)
             )
+
+    def test_production_refuses_private_endpoints(self):
+        with pytest.raises(ValueError, match="EVALYX_ALLOW_PRIVATE_ENDPOINTS"):
+            make_settings(
+                app_env="production",
+                evalyx_allow_private_endpoints=True,
+            )
+
+    def test_private_endpoints_allowed_outside_production(self):
+        settings = make_settings(evalyx_allow_private_endpoints=True)
+        assert settings.evalyx_allow_private_endpoints is True
+        assert make_settings().evalyx_allow_private_endpoints is False
 
     def test_malformed_encryption_key_fails_without_echo(self):
         with pytest.raises(ValueError, match="EVALYX_ENCRYPTION_KEY"):

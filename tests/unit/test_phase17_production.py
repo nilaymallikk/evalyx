@@ -2,13 +2,13 @@
 
 Covers the deployment contract without live infrastructure:
 
-- production configuration rejects insecure settings (auth off, missing
-  encryption key, missing Clerk configuration, CORS wildcard)
+- production configuration rejects insecure settings (missing
+  encryption key, CORS wildcard)
 - rate limiting: default bucket, eval/test buckets, 429 envelope
 - oversized request bodies rejected (413)
 - security headers present on responses; CORS disabled by default and
   restrictive when enabled
-- metrics endpoint requires authentication and exposes bounded labels only
+- metrics endpoint exposes bounded labels only
 - evaluation bound: oversized dataset versions rejected (422)
 - deployment artifacts exist and contain no secrets
 - logging redacts secret-shaped fields
@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from evalyx.api.app import create_app
-from evalyx.api.auth import AuthContext, OrganizationRole
+from evalyx.api.auth import AuthContext
 from evalyx.api.dependencies import require_organization
 from evalyx.api.errors import EvaluationValidationError
 from evalyx.api.ratelimit import (
@@ -50,14 +50,10 @@ _TEST_ENCRYPTION_KEY = "CZWNnvRiuKkYgjlplxwPzBYz1hQYgo72d8M29i22800="
 
 _AMBIENT_VARS = (
     "APP_ENV",
-    "AUTH_REQUIRED",
     "DATABASE_URL",
     "REDIS_URL",
     "EVALYX_SECRET_KEY",
     "EVALYX_ENCRYPTION_KEY",
-    "CLERK_SECRET_KEY",
-    "CLERK_JWKS_URL",
-    "CLERK_AUTHORIZED_PARTIES",
     "CORS_ALLOWED_ORIGINS",
     "RATE_LIMIT_PER_MINUTE",
     "RATE_LIMIT_EVAL_PER_MINUTE",
@@ -75,7 +71,6 @@ def _clean_environment(monkeypatch):
 def make_settings(**overrides) -> Settings:
     defaults = {
         "evalyx_secret_key": _PLACEHOLDER_SECRET,
-        "auth_required": False,
     }
     return Settings(_env_file=None, **{**defaults, **overrides})
 
@@ -87,11 +82,7 @@ def build_client(settings: Settings | None = None) -> TestClient:
     # Explicit in-memory backend: hermetic tests never touch real Redis
     # (production always uses the Redis backend via app.state.redis).
     app = create_app(settings, rate_limit_backend=InMemoryRateLimitBackend())
-    fake_auth = AuthContext(
-        clerk_user_id="prod-test-user",
-        clerk_organization_id="org_prod_test",
-        organization_role=OrganizationRole.ADMIN,
-    )
+    fake_auth = AuthContext()
     fake_context = (fake_auth, Organization(name="Prod Test Org"))
     app.dependency_overrides[require_authenticated_user] = lambda: fake_auth
     app.dependency_overrides[require_organization] = lambda: fake_context
@@ -102,47 +93,16 @@ def build_client(settings: Settings | None = None) -> TestClient:
 
 
 class TestProductionConfiguration:
-    def test_production_rejects_auth_disabled(self):
-        with pytest.raises(ValidationError, match="AUTH_REQUIRED"):
-            make_settings(app_env="production", auth_required=False)
-
     def test_production_requires_encryption_key(self):
         with pytest.raises(ValidationError, match="EVALYX_ENCRYPTION_KEY"):
             make_settings(
                 app_env="production",
-                auth_required=True,
-                clerk_secret_key="sk-test",
-                clerk_jwks_url="https://example.clerk.dev/.well-known/jwks.json",
                 evalyx_encryption_key="",
             )
-
-    def test_production_requires_clerk_configuration(self):
-        with pytest.raises(ValidationError, match="Clerk configuration missing"):
-            make_settings(
-                app_env="production",
-                auth_required=True,
-                clerk_secret_key="",
-                clerk_jwks_url="",
-                evalyx_encryption_key=_TEST_ENCRYPTION_KEY,
-            )
-        # Error names the missing setting without echoing any secret value.
-        try:
-            make_settings(
-                app_env="production",
-                auth_required=True,
-                clerk_secret_key="",
-                clerk_jwks_url="",
-                evalyx_encryption_key=_TEST_ENCRYPTION_KEY,
-            )
-        except ValidationError as exc:
-            assert "sk-" not in str(exc)
 
     def test_production_accepts_complete_configuration(self):
         settings = make_settings(
             app_env="production",
-            auth_required=True,
-            clerk_secret_key="sk-test",
-            clerk_jwks_url="https://example.clerk.dev/.well-known/jwks.json",
             evalyx_encryption_key=_TEST_ENCRYPTION_KEY,
         )
         assert settings.app_env == "production"
@@ -274,16 +234,12 @@ class TestSecurityHeaders:
 
 
 class TestMetricsEndpoint:
-    def test_metrics_requires_authentication(self):
-        settings = make_settings(
-            auth_required=True,
-            clerk_secret_key="sk-test",
-            clerk_jwks_url="https://example.clerk.dev/.well-known/jwks.json",
-        )
-        app = create_app(settings)
+    def test_metrics_serves_snapshot_without_login(self):
+        app = create_app(make_settings())
         client = TestClient(app)
         response = client.get("/api/v1/metrics")
-        assert response.status_code == 401
+        assert response.status_code == 200
+        assert "metrics" in response.json()
 
     def test_metrics_snapshot_has_no_secret_labels(self):
         client = build_client()
@@ -373,7 +329,7 @@ class TestDeploymentArtifacts:
         for service in ("api:", "worker:", "postgres:", "redis:"):
             assert service in text
         # No secrets baked in: every credential is a ${VAR} reference.
-        for secret in ("POSTGRES_PASSWORD:", "REDIS_PASSWORD", "CLERK_SECRET_KEY",
+        for secret in ("POSTGRES_PASSWORD:", "REDIS_PASSWORD",
                        "EVALYX_SECRET_KEY", "EVALYX_ENCRYPTION_KEY"):
             assert secret in text
         assert "change-me" not in text.lower()
@@ -394,8 +350,8 @@ class TestDeploymentArtifacts:
     def test_env_template_has_no_values(self):
         text = (REPO / ".env.production.example").read_text()
         assert "APP_ENV=production" in text
-        assert "AUTH_REQUIRED=1" in text
-        assert "sk-" not in text or "CLERK_SECRET_KEY=\n" in text
+        assert "CLERK_SECRET_KEY" not in text
+        assert "AUTH_REQUIRED" not in text
 
     def test_entrypoints_production_safe(self):
         api = _non_comment_lines((REPO / "docker/entrypoint-api.sh").read_text())

@@ -1,10 +1,9 @@
-"""Multi-tenancy helpers shared by repositories and services (Phase 14).
+"""Workspace helpers shared by repositories and services.
 
-The tenant boundary is the Clerk organization, mirrored locally as the
+Evalyx serves a single local workspace, mirrored as the
 :class:`Organization` model. Repositories accept an ``organization_id`` on
-every tenant-owned read/write and filter by it, so a valid-id-wrong-tenant
-lookup behaves exactly like a missing row (404, never another tenant's
-data). All queries use SQLAlchemy ORM expressions with bound parameters.
+every owned read/write and filter by it. All queries use SQLAlchemy ORM
+expressions with bound parameters.
 
 Style note: newer repository code uses ``session.scalars(...)`` for ORM
 entity queries (scalar-mapping built in); the grandfathered
@@ -18,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from evalyx.db.models import Organization
 from evalyx.db.repositories.errors import NotFoundError
+
+#: The single local workspace's external id (unique here — provisioning is
+#: idempotent on it).
+LOCAL_ORGANIZATION_ID = "local"
 
 
 class TenantError(Exception):
@@ -43,11 +46,10 @@ async def require_organization(
     session: AsyncSession,
     clerk_organization_id: str,
 ) -> Organization:
-    """The local organization for a Clerk organization (auto-provisioning).
+    """The local organization for an external organization id.
 
-    The workspace row is created on first use so the API stays usable the
-    moment a Clerk organization starts calling Evalyx. Provisioning is
-    idempotent on the unique ``clerk_organization_id``.
+    The workspace row is created on first use. Provisioning is idempotent
+    on the unique ``clerk_organization_id``.
     """
     organization = await get_organization_by_clerk_id(session, clerk_organization_id)
     if organization is None:
@@ -61,6 +63,11 @@ async def require_organization(
     return organization
 
 
+async def require_local_organization(session: AsyncSession) -> Organization:
+    """The single local workspace (auto-provisioned on first use)."""
+    return await require_organization(session, LOCAL_ORGANIZATION_ID)
+
+
 def tenant_not_found(resource: str, resource_id: uuid.UUID) -> NotFoundError:
     """Uniform 404 for both missing rows and other tenants' rows.
 
@@ -71,8 +78,10 @@ def tenant_not_found(resource: str, resource_id: uuid.UUID) -> NotFoundError:
 
 
 __all__ = [
+    "LOCAL_ORGANIZATION_ID",
     "TenantError",
     "get_organization_by_clerk_id",
+    "require_local_organization",
     "require_organization",
     "tenant_not_found",
 ]

@@ -21,7 +21,7 @@ from evalyx.quotas import QuotaService
 def _settings(**overrides):
     from evalyx.core.config import Settings
 
-    defaults = {"evalyx_secret_key": "placeholder", "auth_required": False}
+    defaults = {"evalyx_secret_key": "placeholder"}
     return Settings(_env_file=None, **{**defaults, **overrides})
 
 

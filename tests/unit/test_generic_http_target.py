@@ -35,8 +35,8 @@ def _allowing_resolver(*, blocked_hosts: set[str] | None = None):
     """Deterministic stand-in for the DNS-based SSRF check."""
     blocked = blocked_hosts or set()
 
-    async def resolve(url: str) -> None:
-        assert_static_url_allowed(url)
+    async def resolve(url: str, **kwargs: object) -> None:
+        assert_static_url_allowed(url, **kwargs)  # type: ignore[arg-type]
         host = (urlparse(url).hostname or "").lower()
         if host in blocked:
             raise SSRFViolationError("blocked in test")
@@ -332,7 +332,7 @@ async def test_redirect_rebinding_blocked(mock_client):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"Location": "https://93.184.216.34/x"})
 
-    async def rebinding_resolver(url: str) -> None:
+    async def rebinding_resolver(url: str, **kwargs: object) -> None:
         raise SSRFViolationError("resolved to private address")
 
     target = mock_client(

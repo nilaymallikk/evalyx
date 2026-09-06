@@ -99,12 +99,52 @@ def _parse_numeric_ipv4(host: str) -> ipaddress.IPv4Address | None:
     return None
 
 
-def _assert_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
-    """Raise when ``ip`` is not a public, globally-routable address."""
+#: Address ranges the local-dev opt-in additionally permits: loopback and
+#: private-use unicast only (RFC 1918 IPv4, IPv6 ULA). Everything else —
+#: notably link-local (cloud metadata), multicast, unspecified, reserved —
+#: stays blocked. ``ip.is_private`` is deliberately NOT used: CPython
+#: counts link-local and unspecified as "private".
+_PRIVATE_USE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+def _is_private_use_unicast(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """Loopback or RFC 1918 / ULA — the only non-public ranges permitted."""
+    if ip.is_loopback:
+        return True
+    return any(
+        ip.version == network.version and ip in network
+        for network in _PRIVATE_USE_NETWORKS
+    )
+
+
+def _assert_public_ip(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    *,
+    allow_private: bool = False,
+) -> None:
+    """Raise when ``ip`` is not an acceptable destination.
+
+    By default only public, globally-routable addresses pass. With
+    ``allow_private`` (explicit local-dev opt-in via
+    ``EVALYX_ALLOW_PRIVATE_ENDPOINTS=1`` — refused in production),
+    loopback and RFC1918-private/ULA addresses additionally pass so locally
+    running apps can be evaluated. Link-local (including the cloud
+    metadata service), multicast, unspecified, and reserved addresses stay
+    blocked either way.
+    """
     # Unwrap IPv4-mapped IPv6 addresses (::ffff:127.0.0.1) so they cannot
     # masquerade as public IPv6.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    if allow_private and _is_private_use_unicast(ip):
+        return
     blocked = (
         ip.is_private
         or ip.is_loopback
@@ -120,7 +160,7 @@ def _assert_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None
         )
 
 
-def assert_static_url_allowed(url: str) -> None:
+def assert_static_url_allowed(url: str, *, allow_private: bool = False) -> None:
     """Cheap synchronous URL validation (configuration-time boundary).
 
     Does not resolve DNS — the authoritative per-request check is
@@ -146,29 +186,33 @@ def assert_static_url_allowed(url: str) -> None:
     if port is not None and not (0 < port <= 65535):
         raise SSRFViolationError("Application endpoint port is out of range.")
     lowered = hostname.lower().rstrip(".")
-    if lowered == "localhost" or lowered.endswith(".localhost"):
+    if not allow_private and (
+        lowered == "localhost" or lowered.endswith(".localhost")
+    ):
         raise SSRFViolationError("Application endpoint must not target localhost.")
     # Literal IPs are fully checkable right now; hostnames are checked at
     # request time via DNS resolution. Obfuscated numeric literals (decimal,
     # hex, octal, short forms) are recognized too — the OS resolver would
     # accept them even though ``ipaddress`` does not.
     try:
-        _assert_public_ip(ipaddress.ip_address(lowered))
+        _assert_public_ip(ipaddress.ip_address(lowered), allow_private=allow_private)
     except ValueError:
         pass
     else:
         return
     obfuscated = _parse_numeric_ipv4(lowered)
     if obfuscated is not None:
-        _assert_public_ip(obfuscated)
+        _assert_public_ip(obfuscated, allow_private=allow_private)
 
 
-async def resolve_public_addresses(hostname: str, port: int) -> list[str]:
-    """Resolve ``hostname`` and require every address to be public.
+async def resolve_public_addresses(
+    hostname: str, port: int, *, allow_private: bool = False
+) -> list[str]:
+    """Resolve ``hostname`` and require every address to be acceptable.
 
     Returns the deduplicated validated address strings (first answer wins
     for connection purposes). Raises :class:`SSRFViolationError` when
-    resolution fails or any address is non-public. Shared by the
+    resolution fails or any address is unacceptable. Shared by the
     request-time check and the pinning transport so both validate the same
     way.
     """
@@ -190,22 +234,24 @@ async def resolve_public_addresses(hostname: str, port: int) -> list[str]:
         if address in seen:
             continue
         seen.add(address)
-        _assert_public_ip(ipaddress.ip_address(address))
+        _assert_public_ip(ipaddress.ip_address(address), allow_private=allow_private)
         validated.append(address)
     return validated
 
 
-async def assert_url_resolves_public(url: str) -> None:
-    """Resolve ``url``'s hostname and require every address to be public.
+async def assert_url_resolves_public(
+    url: str, *, allow_private: bool = False
+) -> None:
+    """Resolve ``url``'s hostname and require every address to be acceptable.
 
     The authoritative SSRF check. Re-run before every transport attempt
     (including every redirect hop) to keep DNS-rebinding windows small.
     """
-    assert_static_url_allowed(url)
+    assert_static_url_allowed(url, allow_private=allow_private)
     parsed = urlparse(url)
     hostname = parsed.hostname or ""
     port = parsed.port or _DEFAULT_PORTS.get(parsed.scheme.lower(), 80)
-    await resolve_public_addresses(hostname, port)
+    await resolve_public_addresses(hostname, port, allow_private=allow_private)
 
 
 def is_redirect(status_code: int) -> bool:
